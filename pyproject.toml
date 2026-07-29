@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ezwork"
+version = "0.4.0"
+description = "Ezwork — a lean agent kernel with a minimal CLI app on top."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Ezwork" }]
+dependencies = [
+    "openai>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+ezwork = "ezwork.app.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ezwork"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
