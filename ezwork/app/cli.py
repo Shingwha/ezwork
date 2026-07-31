@@ -3,6 +3,8 @@
     ezwork                                  REPL: streaming, multi-turn
     ezwork -p "your question"               oneshot: answer to stdout,
                                          session id + tokens to stderr
+    cat file | ezwork                       piped stdin becomes the first REPL
+                                         message (streaming UI, then keep chatting)
     ezwork -p "continue..." -s <id>         oneshot, continue an existing session
     ezwork --model X                        override model for this run
     ezwork --no-session                     oneshot without persisting a session
@@ -264,6 +266,42 @@ def _persist_session(
         pass
 
 
+async def _run_turn(
+    agent: Agent,
+    ui: UI,
+    store: SessionStore,
+    config: Config,
+    session: Session | None,
+    line: str,
+) -> Session | None:
+    """Run one chat turn with SIGINT→cancel handling. Creates the session
+    lazily on first real message. Returns the (possibly new) session."""
+    if session is None:
+        session = Session.new(_cwd(), model=config.model, provider=config.provider)
+
+    task = asyncio.ensure_future(agent.chat(line))
+    cancelled = False
+
+    def _on_sigint(_s, _f):
+        nonlocal cancelled
+        cancelled = True
+        if not task.done():
+            task.cancel()
+
+    original = signal.signal(signal.SIGINT, _on_sigint)
+    try:
+        await task
+    except asyncio.CancelledError:
+        ui.info("(interrupted)")
+    except Exception as e:
+        ui.error(f"[error] {e}")
+    finally:
+        signal.signal(signal.SIGINT, original)
+
+    _persist_session(store, session, agent.messages)
+    return session
+
+
 async def repl(
     *,
     session_id: str | None = None,
@@ -288,6 +326,15 @@ async def repl(
 
     model = config.model or config.provider
     ui.info(f"Ezwork {__version__} — {model}  ·  /help for commands")
+
+    # Piped stdin (no -p): treat the whole input as the first message, then
+    # keep the REPL going. On a non-tty stdin the prompt loop below will hit
+    # EOFError right after and exit cleanly, so `cat file | ezwork` behaves
+    # like a one-shot with the streaming UI.
+    piped = _read_stdin_if_piped()
+    if piped and piped.rstrip():
+        ui.info("(piped stdin → first message)")
+        session = await _run_turn(agent, ui, store, config, session, piped.rstrip())
 
     while True:
         try:
@@ -331,30 +378,8 @@ async def repl(
                 )
             continue
 
-        # Normal chat turn. Create the session lazily on first real message.
-        if session is None:
-            session = Session.new(_cwd(), model=config.model, provider=config.provider)
-
-        task = asyncio.ensure_future(agent.chat(line))
-        cancelled = False
-
-        def _on_sigint(_s, _f):
-            nonlocal cancelled
-            cancelled = True
-            if not task.done():
-                task.cancel()
-
-        original = signal.signal(signal.SIGINT, _on_sigint)
-        try:
-            await task
-        except asyncio.CancelledError:
-            ui.info("(interrupted)")
-        except Exception as e:
-            ui.error(f"[error] {e}")
-        finally:
-            signal.signal(signal.SIGINT, original)
-
-        _persist_session(store, session, agent.messages)
+        # Normal chat turn.
+        session = await _run_turn(agent, ui, store, config, session, line)
 
 
 def _print_help() -> None:
