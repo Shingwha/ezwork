@@ -64,3 +64,66 @@ def test_prompt_sections_joined_by_blank_line():
     p = Prompt([Section("a", "1", priority=0), Section("b", "2", priority=1)])
     out = p.build()
     assert out == "a: 1\n\nb: 2"
+
+
+# ── skill discovery / frontmatter ────────────────────────────
+
+from ezwork.app.prompt import _discover_skills, _parse_frontmatter
+
+
+def test_parse_frontmatter_simple():
+    text = """---
+name: foo
+description: Does foo things.
+---
+
+# body
+"""
+    fm = _parse_frontmatter(text)
+    assert fm == {"name": "foo", "description": "Does foo things."}
+
+
+def test_parse_frontmatter_folded_block():
+    text = """---
+name: bar
+description: >-
+  Wraps any HTTP API, web service, library, database, or existing tool into a
+  self-contained CLI application.
+---
+
+# body
+"""
+    fm = _parse_frontmatter(text)
+    assert fm["name"] == "bar"
+    assert fm["description"] == (
+        "Wraps any HTTP API, web service, library, database, or existing tool "
+        "into a self-contained CLI application."
+    )
+
+
+def test_parse_frontmatter_missing_or_malformed():
+    assert _parse_frontmatter("# no frontmatter\nbody") == {}
+    assert _parse_frontmatter("---\nunclosed") == {}
+
+
+def test_parse_frontmatter_ignores_quotes_and_colon_in_value():
+    fm = _parse_frontmatter('---\nname: "quoted"\ndescription: see https://x.com/y\n---\n')
+    assert fm == {"name": "quoted", "description": "see https://x.com/y"}
+
+
+def test_discover_skills_uses_frontmatter_name_and_description(tmp_path):
+    (tmp_path / "skills").mkdir()
+    skill_dir = tmp_path / "skills" / "my-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: real-name\ndescription: Does real things.\n---\n\nbody\n",
+        encoding="utf-8",
+    )
+    skills = _discover_skills([tmp_path / "skills"])
+    assert skills == [("real-name", "Does real things.", str((skill_dir / "SKILL.md").resolve()))]
+
+
+def test_discover_skills_skips_dirs_without_skill_md(tmp_path):
+    (tmp_path / "skills").mkdir()
+    (tmp_path / "skills" / "nope").mkdir()
+    assert _discover_skills([tmp_path / "skills"]) == []

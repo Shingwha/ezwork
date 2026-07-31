@@ -159,12 +159,61 @@ AGENTS_GUIDE = (
 )
 
 
-def _discover_skills(skills_dirs: list[Path]) -> list[tuple[str, str]]:
+def _parse_frontmatter(text: str) -> dict:
+    """Parse the YAML frontmatter block of a SKILL.md (zero dependencies).
+
+    Handles the subset our skills actually use: plain `key: value` scalars
+    (quoted or not) and `>-` / `|` block scalars. Anything fancier is
+    ignored. Returns {} when there is no frontmatter or it is malformed.
+    """
+    if not text.startswith("---"):
+        return {}
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}
+    fm: dict[str, str] = {}
+    key: str | None = None
+    block: list[str] = []
+    block_literal = False
+    for raw in parts[1].splitlines():
+        line = raw.rstrip()
+        if not line.strip() or line.startswith("#") or line in ("---", "..."):
+            continue
+        if key is not None and line.startswith(" "):
+            block.append(line.strip())
+            continue
+        if key is not None:  # block ended by a new key at column 0
+            fm[key] = "\n".join(block) if block_literal else " ".join(block)
+            key = None
+        k, _, v = line.partition(":")
+        key = k.strip()
+        v = v.strip()
+        if v in (">", ">-"):
+            block, block_literal = [], False
+        elif v in ("|", "|-"):
+            block, block_literal = [], True
+        else:
+            fm[key] = v.strip("'\"")
+            key = None
+    if key is not None:
+        fm[key] = "\n".join(block) if block_literal else " ".join(block)
+    return fm
+
+
+def _read_skill_md(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def _discover_skills(skills_dirs: list[Path]) -> list[tuple[str, str, str]]:
     """Find skills: any subdirectory of a skills dir that contains SKILL.md.
-    Returns [(name, skill_md_path), ...]. Earlier dirs win on name conflicts
-    (the caller lists dirs highest-priority first)."""
+    Returns [(name, description, skill_md_path), ...]. The frontmatter `name`
+    wins over the directory name; earlier dirs win on name conflicts (the
+    caller lists dirs highest-priority first)."""
     seen: set[str] = set()
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, str]] = []
     for base in skills_dirs:
         if not base.exists() or not base.is_dir():
             continue
@@ -178,11 +227,12 @@ def _discover_skills(skills_dirs: list[Path]) -> list[tuple[str, str]]:
             skill_md = child / "SKILL.md"
             if not skill_md.exists():
                 continue
-            name = child.name
+            fm = _parse_frontmatter(_read_skill_md(skill_md))
+            name = fm.get("name") or child.name
             if name in seen:
                 continue
             seen.add(name)
-            out.append((name, str(skill_md.resolve())))
+            out.append((name, fm.get("description", ""), str(skill_md.resolve())))
     return out
 
 
@@ -197,10 +247,15 @@ def _render_skills_block(skills_dirs: list[Path]) -> str:
         '(e.g. read(path="<path>")) and then follow its instructions exactly. '
         "Never assume skill content — always read SKILL.md before acting.",
         "",
-        "Available skills (name + SKILL.md path):",
+        "Available skills (name — description; SKILL.md path):",
     ]
-    for name, skill_md in skills:
-        lines.append(f'  <skill name="{name}" path="{skill_md}"/>')
+    for name, desc, skill_md in skills:
+        tag = f'  <skill name="{name}"'
+        if desc:
+            esc = desc.replace("&", "&amp;").replace("<", "&lt;").replace('"', "&quot;")
+            tag += f' description="{esc}"'
+        tag += f' path="{skill_md}"/>'
+        lines.append(tag)
     return "\n".join(lines)
 
 
