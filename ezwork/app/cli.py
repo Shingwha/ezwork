@@ -4,7 +4,9 @@
     ezwork -p "your question"               oneshot: answer to stdout,
                                          session id + tokens to stderr
     cat file | ezwork                       piped stdin becomes the first REPL
-                                         message (streaming UI, then keep chatting)
+                                         message (streaming UI); if the pipe
+                                         is closed the REPL exits with a
+                                         resume hint (ezwork -s <id>)
     ezwork -p "continue..." -s <id>         oneshot, continue an existing session
     ezwork --model X                        override model for this run
     ezwork --no-session                     oneshot without persisting a session
@@ -328,10 +330,10 @@ async def repl(
     ui.info(f"Ezwork {__version__} — {model}  ·  /help for commands")
 
     # Piped stdin (no -p): treat the whole input as the first message, then
-    # keep the REPL going. On a non-tty stdin the prompt loop below will hit
-    # EOFError right after and exit cleanly, so `cat file | ezwork` behaves
-    # like a one-shot with the streaming UI.
-    piped = _read_stdin_if_piped()
+    # keep the REPL going. wait_eof=False so a still-open pipe (tail -f)
+    # can't block the prompt loop; a closed pipe hits EOFError below and
+    # exits with a resume hint.
+    piped = _read_stdin_if_piped(wait_eof=False)
     if piped and piped.rstrip():
         ui.info("(piped stdin → first message)")
         session = await _run_turn(agent, ui, store, config, session, piped.rstrip())
@@ -342,6 +344,15 @@ async def repl(
         except (EOFError, KeyboardInterrupt):
             print()
             _persist_session(store, session, agent.messages)
+            # A closed pipe (e.g. `echo hi | ezwork`) has no input source left,
+            # so the REPL cannot continue — make the exit explicit instead of
+            # silent, and point to the resume command.
+            if session is not None and session.messages and not sys.stdin.isatty():
+                print(
+                    f"(stdin closed — conversation saved. Continue with: "
+                    f"ezwork -s {session.id})",
+                    file=sys.stderr,
+                )
             return 0
         if not line:
             continue
@@ -468,7 +479,32 @@ def _enable_ansi() -> None:
         os.system("")
 
 
-def _read_stdin_if_piped() -> str | None:
+def _read_available_stdin() -> str | None:
+    """POSIX: non-blockingly read whatever stdin has buffered right now,
+    without waiting for EOF. Returns None if nothing is available."""
+    import fcntl
+    import os
+
+    fd = sys.stdin.fileno()
+    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+    chunks: list[bytes] = []
+    try:
+        while True:
+            b = os.read(fd, 65536)
+            if not b:  # EOF reached
+                break
+            chunks.append(b)
+    except BlockingIOError:
+        pass  # no more data available right now
+    finally:
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags)
+    if not chunks:
+        return None
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def _read_stdin_if_piped(wait_eof: bool = True) -> str | None:
     if sys.stdin.isatty():
         return None
     if sys.platform == "win32":
@@ -493,7 +529,11 @@ def _read_stdin_if_piped() -> str | None:
         r, _, _ = select.select([sys.stdin], [], [], 0)
         if not r:
             return None
-        return sys.stdin.read()
+        # wait_eof=False (REPL): drain only what's buffered now, so a
+        # still-open pipe (e.g. `tail -f log | ezwork`) can't block the
+        # prompt loop forever. wait_eof=True (oneshot): block until EOF for
+        # a complete read, matching `cat file | ezwork -p`.
+        return sys.stdin.read() if wait_eof else _read_available_stdin()
     except Exception:
         return None
 
