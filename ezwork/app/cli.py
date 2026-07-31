@@ -29,7 +29,6 @@ import argparse
 import asyncio
 import signal
 import sys
-import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -103,7 +102,7 @@ def build_agent(
     cfg = LoopConfig(
         max_retries=2,
         thinking=config.thinking,
-        reasoning_effort=config.effective_reasoning_effort(),
+        reasoning_effort=config.reasoning_effort or None,
         max_tokens=config.max_tokens,
     )
     if render:
@@ -163,20 +162,6 @@ def load_config_or_exit() -> Config:
         )
         sys.exit(0)
     return config
-
-
-def _warmup_provider(agent: Agent) -> None:
-    """Preload the provider's HTTP client in a background thread.
-
-    The openai SDK (~1s import) is lazy-loaded on the first request. In REPL
-    mode we kick it off while the user is typing their first message, so the
-    first chat turn doesn't pay the import cost. Daemon thread: if the user
-    quits before it finishes, nothing is left behind.
-    """
-    ensure = getattr(getattr(agent, "provider", None), "_ensure_client", None)
-    if ensure is None:
-        return
-    threading.Thread(target=ensure, daemon=True).start()
 
 
 # ─── modes ─────────────────────────────────────────────────────────────────
@@ -273,7 +258,6 @@ async def repl(
     config = load_config_or_exit()
     agent = build_agent(config, render=True, model_override=model_override)
     store = SessionStore()
-    _warmup_provider(agent)  # preload openai SDK while the user types
 
     session: Session | None = None
     ui = UI()
@@ -287,7 +271,7 @@ async def repl(
         ui.info(f"(resumed session {session.id}: {session.title or 'untitled'})")
 
     model = config.model or config.provider
-    ui.info(f"Ezwork {__version__} — {model}  ·  /help for commands")
+    ui.info(f"Ezwork {__version__} — {model}")
 
     while True:
         try:
@@ -355,6 +339,7 @@ async def repl(
             signal.signal(signal.SIGINT, original)
 
         _persist_session(store, session, agent.messages)
+        ui.divider()  # separator before the next prompt
 
 
 def _print_help() -> None:
@@ -403,6 +388,7 @@ def _print_sessions(store: SessionStore, limit: int = 10) -> None:
 
 
 def _resume_cmd(store: SessionStore, arg: str) -> Session | None:
+    """Resume by id; with no id, list recent sessions and hint at /resume <id>."""
     if arg:
         loaded = store.load(_cwd(), arg)
         if loaded is None:
@@ -412,20 +398,10 @@ def _resume_cmd(store: SessionStore, arg: str) -> Session | None:
     if not sessions:
         print("(no sessions for this directory)")
         return None
-    print("recent sessions (enter an id to resume, or blank to cancel):")
+    print("recent sessions (use /resume <id> to resume one):")
     for s in sessions[:10]:
         print(_format_session_line(s))
-    try:
-        choice = input("\nresume> ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return None
-    if not choice:
-        return None
-    loaded = store.load(_cwd(), choice)
-    if loaded is None:
-        print(f"[error] session {choice} not found")
-    return loaded
+    return None
 
 
 # ─── entry ─────────────────────────────────────────────────────────────────
@@ -443,50 +419,12 @@ def _enable_ansi() -> None:
         os.system("")
 
 
-def _read_stdin_if_piped() -> str | None:
-    if sys.stdin.isatty():
-        return None
-    if sys.platform == "win32":
-        # select() only works on sockets on Windows (pipes raise OSError),
-        # so probe via a short-lived daemon thread instead. If nothing
-        # arrives within the timeout, treat as no input.
-        result: list[str] = []
-
-        def _read() -> None:
-            try:
-                result.append(sys.stdin.read())
-            except Exception:
-                pass
-
-        t = threading.Thread(target=_read, daemon=True)
-        t.start()
-        t.join(timeout=0.2)
-        return result[0] if result else None
-    try:
-        import select
-
-        r, _, _ = select.select([sys.stdin], [], [], 0)
-        if not r:
-            return None
-        return sys.stdin.read()
-    except Exception:
-        return None
-
-
-def _compose_prompt(prompt: str, stdin_text: str | None) -> str:
-    """Attach piped stdin as context to the prompt (carried over from the
-    legacy app: `cat file | ezwork -p "explain this"`)."""
-    if not stdin_text or not stdin_text.rstrip():
-        return prompt
-    return f"{stdin_text.rstrip()}\n\n---\n\n{prompt}"
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="ezwork",
         description="Ezwork — a lean coding agent (REPL or one-shot).",
     )
-    parser.add_argument("-p", "--prompt", help="one-shot prompt; omit for REPL. Use '-' to read from stdin.")
+    parser.add_argument("-p", "--prompt", help="one-shot prompt; omit for REPL.")
     parser.add_argument("-s", "--session", help="session id to resume/continue.")
     parser.add_argument("--model", help="override the model for this run.")
     parser.add_argument(
@@ -505,16 +443,10 @@ def main() -> int:
     _enable_ansi()
 
     if args.prompt is not None:
-        stdin_text = _read_stdin_if_piped()
-        prompt = args.prompt
-        if prompt == "-" and stdin_text:
-            prompt = stdin_text.rstrip()
-            stdin_text = None
-        prompt = _compose_prompt(prompt, stdin_text)
         try:
             return asyncio.run(
                 oneshot(
-                    prompt,
+                    args.prompt,
                     session_id=args.session,
                     no_session=args.no_session,
                     model_override=args.model,

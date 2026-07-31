@@ -159,6 +159,47 @@ class WriteTool(Tool):
 
 # ---- edit ----
 
+import os
+import threading
+from difflib import SequenceMatcher
+
+_EDIT_LOCKS: dict[str, threading.Lock] = {}
+_EDIT_LOCKS_GUARD = threading.Lock()
+
+
+def _edit_lock_for(path: Path) -> threading.Lock:
+    """Per-file lock — tool calls in one turn run in parallel
+    (asyncio.gather), so concurrent edits to the same file would otherwise
+    read-modify-write from the same snapshot and lose updates."""
+    key = str(path.resolve())
+    if os.name == "nt":
+        key = key.lower()
+    with _EDIT_LOCKS_GUARD:
+        lock = _EDIT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _EDIT_LOCKS[key] = lock
+        return lock
+
+
+def _closest_line_hint(text: str, old: str) -> str:
+    """Best-matching line vs the first non-blank line of old_string."""
+    target = old.strip().splitlines()[0] if old.strip() else ""
+    if not target:
+        return ""
+    best, best_ratio = "", 0.0
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        r = SequenceMatcher(None, target, s).ratio()
+        if r > best_ratio:
+            best, best_ratio = s, r
+    if best and best_ratio >= 0.5:
+        return f"\nClosest line in file: {best[:120]!r}"
+    return ""
+
+
 _EDIT_PARAMS = {
     "path": {"type": "string", "description": "File path to edit"},
     "old_string": {
@@ -181,25 +222,51 @@ _EDIT_DESC = (
 
 
 class EditTool(Tool):
-    """Find and replace text in a file."""
+    """Find and replace text in a file (concurrency-safe per file)."""
 
     def __init__(self) -> None:
         super().__init__(name="edit", description=_EDIT_DESC, params=_EDIT_PARAMS, func=self._execute)
 
+    @staticmethod
+    def _not_found_msg(text: str, old: str, new: str, name: str) -> str:
+        # The classic mistake: old_string/new_string swapped.
+        if new and new in text:
+            return (
+                f"old_string not found in {name} — but new_string IS present in "
+                "the file. Did you swap old_string and new_string?"
+            )
+        return f"old_string not found in file" + _closest_line_hint(text, old)
+
+    @staticmethod
+    def _not_unique_msg(text: str, old: str, count: int) -> str:
+        lines: list[int] = []
+        start = 0
+        while True:
+            i = text.find(old, start)
+            if i < 0:
+                break
+            lines.append(text.count("\n", 0, i) + 1)
+            start = i + 1
+        return (
+            f"old_string appears {count} times (lines {lines}) — "
+            "must be unique (use all=true to replace every occurrence)"
+        )
+
     def _execute(self, args: dict) -> str:
         p = require_file(Path(args["path"]))
-        text = p.read_text(encoding="utf-8")
-        old, new = args["old_string"], args["new_string"]
-        if old not in text:
-            raise ToolError("old_string not found in file", "not_found")
-        count = text.count(old)
-        replace_all = args.get("all", False)
-        if not replace_all and count > 1:
-            raise ToolError(
-                f"old_string appears {count} times, must be unique (use all=true)",
-                "not_unique",
-            )
-        replacement = text.replace(old, new) if replace_all else text.replace(old, new, 1)
-        p.write_text(replacement, encoding="utf-8")
-        actual = count if replace_all else 1
-        return f"Replaced {actual} occurrence(s) in {p.name}"
+        with _edit_lock_for(p):
+            text = p.read_text(encoding="utf-8")
+            # File content arrives as \n (universal newlines); normalise the
+            # pattern so CRLF from the caller still matches.
+            old = args["old_string"].replace("\r\n", "\n")
+            new = args["new_string"]
+            if old not in text:
+                raise ToolError(self._not_found_msg(text, old, new, p.name), "not_found")
+            count = text.count(old)
+            replace_all = args.get("all", False)
+            if not replace_all and count > 1:
+                raise ToolError(self._not_unique_msg(text, old, count), "not_unique")
+            replacement = text.replace(old, new, -1 if replace_all else 1)
+            p.write_text(replacement, encoding="utf-8")
+            actual = count if replace_all else 1
+            return f"Replaced {actual} occurrence(s) in {p.name}"

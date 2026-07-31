@@ -46,7 +46,6 @@ class Palette:
     GRAY = "\033[90m"
     RED = "\033[91m"
     GREEN = "\033[92m"
-    YELLOW = "\033[93m"
     MAGENTA = "\033[95m"
     CYAN = "\033[96m"
     SOFT_CYAN = "\033[36m"
@@ -57,7 +56,6 @@ class Palette:
         "muted": GRAY,
         "success": GREEN,
         "error": RED,
-        "warn": YELLOW,
         "accent": CYAN,
         "info": SOFT_CYAN,
     }
@@ -114,22 +112,24 @@ class UI:
         self._width = self._terminal_width()
         self._section: str | None = None  # "thinking" | "answer" | None
         self._partial = ""               # unflushed thinking line buffer
+        self._at_line_start = True       # is stdout at the start of a fresh line?
         self._pending_tool: _ToolLine | None = None
         self._usage = None
 
     # ── public helpers for the REPL (non-streaming) ──
 
     def prompt(self) -> str:
-        return input(Palette.paint("❯ ", "accent", "bold"))
+        return input("❯ ")
 
     def info(self, text: str) -> None:
         self._print(Palette.paint(text, "dim"))
 
-    def warn(self, text: str) -> None:
-        self._print(Palette.paint(text, "warn"))
-
     def error(self, text: str) -> None:
         self._print(Palette.paint(f"✗ {text}", "error"))
+
+    def divider(self) -> None:
+        """Separator line shown between turns, before the next prompt."""
+        self._print(Palette.paint("─" * min(self._width, 48), "muted"))
 
     # ── event dispatch (LoopConfig.emit callback) ──
 
@@ -142,6 +142,7 @@ class UI:
 
     def _print(self, text: str = "", *, end: str = "\n") -> None:
         print(text, end=end, flush=True)
+        self._at_line_start = end == "\n" or text.endswith("\n")
 
     @staticmethod
     def _terminal_width() -> int:
@@ -161,8 +162,9 @@ class UI:
         if self._section == "thinking" and self._partial:
             self._print(Palette.paint(f"┊ {self._partial}", "dim"))
         self._partial = ""
-        if self._section is not None:
-            self._print()  # end the streamed section with a newline
+        # Only terminate a streamed answer line — never print a blank line.
+        if self._section == "answer" and not self._at_line_start:
+            self._print()
         self._section = None
 
     # ── event handlers ──
@@ -170,7 +172,7 @@ class UI:
     def _on_iter_start(self, event) -> None:
         if event.iteration > 0:
             self._close_section()
-            self._print(Palette.paint("─" * min(self._width, 48), "muted"))
+            self.divider()
 
     def _on_stream_chunk(self, event) -> None:
         chunk = event.chunk

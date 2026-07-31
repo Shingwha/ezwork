@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -61,20 +61,18 @@ class Session:
     title: str = ""
     model: str = ""
     provider: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Session":
         return cls(
-            id=data["id"],
-            created_at=data["created_at"],
-            updated_at=data["updated_at"],
-            workdir=data["workdir"],
-            messages=data.get("messages", []),
-            title=data.get("title", ""),
-            model=data.get("model", ""),
-            provider=data.get("provider", ""),
-            metadata=data.get("metadata", {}),
+            id=str(data.get("id", "")),
+            created_at=str(data.get("created_at", "")),
+            updated_at=str(data.get("updated_at", "")),
+            workdir=str(data.get("workdir", "")),
+            messages=list(data.get("messages", []) or []),
+            title=str(data.get("title", "")),
+            model=str(data.get("model", "")),
+            provider=str(data.get("provider", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -87,7 +85,6 @@ class Session:
             "title": self.title,
             "model": self.model,
             "provider": self.provider,
-            "metadata": self.metadata,
         }
 
     @classmethod
@@ -133,10 +130,9 @@ class SessionStore:
             data = _read_json(f)
             if data is None:
                 continue
-            try:
-                sessions.append(Session.from_dict(data))
-            except KeyError:
-                continue
+            s = Session.from_dict(data)
+            if s.id:
+                sessions.append(s)
         sessions.sort(key=lambda s: s.updated_at, reverse=True)
         return sessions
 
@@ -154,20 +150,8 @@ class SessionStore:
         data = _read_json(self._dir_for(workdir) / f"{session_id}.json")
         if data is None:
             return None
-        try:
-            return Session.from_dict(data)
-        except KeyError:
-            return None
-
-    def delete(self, workdir: str, session_id: str) -> bool:
-        path = self._dir_for(workdir) / f"{session_id}.json"
-        if not path.exists():
-            return False
-        try:
-            path.unlink()
-            return True
-        except OSError:
-            return False
+        s = Session.from_dict(data)
+        return s if s.id else None
 
 
 __all__ = ["Session", "SessionStore", "DEFAULT_SESSIONS_DIR"]

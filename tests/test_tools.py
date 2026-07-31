@@ -111,6 +111,58 @@ def test_edit_old_string_not_found(tmp_path: Path):
     assert ei.value.code == "not_found"
 
 
+def test_edit_not_found_detects_swapped_args(tmp_path: Path):
+    f = tmp_path / "x.txt"
+    f.write_text("hello world", encoding="utf-8")
+    with pytest.raises(ToolError) as ei:
+        EditTool().run({"path": str(f), "old_string": "goodbye", "new_string": "hello world"})
+    assert ei.value.code == "not_found"
+    assert "swap" in ei.value.message.lower()
+
+
+def test_edit_not_found_suggests_closest_line(tmp_path: Path):
+    f = tmp_path / "x.txt"
+    f.write_text("def foo():\n    return 1\n", encoding="utf-8")
+    with pytest.raises(ToolError) as ei:
+        EditTool().run({"path": str(f), "old_string": "def foo()::", "new_string": "x"})
+    assert "def foo():" in ei.value.message
+
+
+def test_edit_not_unique_reports_line_numbers(tmp_path: Path):
+    f = tmp_path / "x.txt"
+    f.write_text("a\nx\na\n", encoding="utf-8")
+    with pytest.raises(ToolError) as ei:
+        EditTool().run({"path": str(f), "old_string": "a", "new_string": "b"})
+    assert "[1, 3]" in ei.value.message
+
+
+def test_edit_crlf_pattern_matches(tmp_path: Path):
+    """A CRLF-bearing old_string matches a CRLF file (Windows line endings)."""
+    f = tmp_path / "x.txt"
+    f.write_text("foo\r\nbar\r\n", encoding="utf-8", newline="")
+    out = EditTool().run({"path": str(f), "old_string": "foo\r\nbar", "new_string": "X"})
+    assert "X\r\n" in f.read_bytes().decode()
+    assert "1 occurrence" in out
+
+
+def test_edit_concurrent_same_file_all_apply(tmp_path: Path):
+    """Concurrent edits to one file must all apply (per-file lock)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    f = tmp_path / "x.txt"
+    f.write_text("a\nb\nc\nd\n", encoding="utf-8")
+    edits = [
+        {"path": str(f), "old_string": "a", "new_string": "A"},
+        {"path": str(f), "old_string": "b", "new_string": "B"},
+        {"path": str(f), "old_string": "c", "new_string": "C"},
+        {"path": str(f), "old_string": "d", "new_string": "D"},
+    ]
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        results = list(ex.map(lambda e: EditTool().run(e), edits))
+    assert f.read_text(encoding="utf-8") == "A\nB\nC\nD\n"
+    assert all("1 occurrence" in r for r in results)
+
+
 # ---- bash ----
 
 

@@ -42,16 +42,6 @@ _VENDOR_DEFAULTS: dict[str, dict[str, Any]] = {
     "openai": {"model": "gpt-4o", "base_url": ""},
 }
 
-_CONFIG_TEMPLATE: dict[str, Any] = {
-    "provider": "longcat",
-    "api_key": _API_KEY_PLACEHOLDER,
-    "base_url": "",
-    "model": "LongCat-2.0",
-    "thinking": True,
-    "reasoning_effort": "",
-    "max_tokens": 32768,
-}
-
 
 @dataclass
 class Config:
@@ -93,11 +83,6 @@ class Config:
             extra_body=dict(data.get("extra_body", {}) or {}),
         )
 
-    def effective_reasoning_effort(self) -> str | None:
-        """reasoning_effort as a string-or-None (empty string -> None = vendor
-        default)."""
-        return self.reasoning_effort or None
-
     # ---- Load / Save ----
 
     @classmethod
@@ -129,8 +114,11 @@ class Config:
         if p.exists():
             return
         p.parent.mkdir(parents=True, exist_ok=True)
+        c = Config()
+        c.api_key = _API_KEY_PLACEHOLDER
+        c.model = _VENDOR_DEFAULTS[c.provider]["model"]
         p.write_text(
-            json.dumps(_CONFIG_TEMPLATE, indent=2, ensure_ascii=False),
+            json.dumps(c.to_dict(), indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
 
@@ -138,39 +126,21 @@ class Config:
         """True once the user has replaced the placeholder api_key."""
         return bool(self.api_key) and self.api_key != _API_KEY_PLACEHOLDER
 
-    def effective_base_url(self) -> str | None:
-        """base_url as a string-or-None (empty string → None → vendor default)."""
-        return self.base_url or None
-
     def build_provider(self) -> Any:
-        """Construct the provider for this config. The vendor factory is
-        looked up by name in ezwork.providers; base_url override applies only
-        when non-empty. Raises ValueError for an unknown provider name."""
-        from ezwork.providers import (
-            DeepSeek,
-            GLM,
-            LongCat,
-            MiniMax,
-            Mimo,
-            OpenAIProvider,
-        )
+        """Construct the provider for this config. Factory names are registered
+        in ezwork.providers.FACTORIES; base_url override applies only when
+        non-empty. Raises ValueError for an unknown provider name."""
+        import ezwork.providers as providers
 
-        factories = {
-            "longcat": LongCat,
-            "deepseek": DeepSeek,
-            "glm": GLM,
-            "mimo": Mimo,
-            "minimax": MiniMax,
-            "openai": OpenAIProvider,
-        }
-        factory = factories.get(self.provider)
-        if factory is None:
+        factory_name = providers.FACTORIES.get(self.provider)
+        if factory_name is None:
             raise ValueError(
                 f"unknown provider: {self.provider!r}. "
-                f"valid values: {', '.join(factories)}"
+                f"valid values: {', '.join(providers.FACTORIES)}"
             )
+        factory = getattr(providers, factory_name)  # triggers lazy import
 
-        base_url = self.effective_base_url()
+        base_url = self.base_url or None
         # Every factory (OpenAIProvider and the vendor factories) accepts
         # api_key / model / base_url / extra_body as keywords — no special
         # cases needed per provider.

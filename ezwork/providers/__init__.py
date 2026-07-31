@@ -9,7 +9,20 @@
 
 from __future__ import annotations
 
+# Config-name -> factory-name map. The app's Config.build_provider() looks up
+# a factory here by the `provider` config value — one place to register a
+# vendor for the CLI.
+FACTORIES: dict[str, str] = {
+    "longcat": "LongCat",
+    "deepseek": "DeepSeek",
+    "glm": "GLM",
+    "mimo": "Mimo",
+    "minimax": "MiniMax",
+    "openai": "OpenAIProvider",
+}
+
 __all__ = [
+    "FACTORIES",
     "OpenAIProvider",
     # built-in vendors (factory + preset live in each vendor's module)
     "LongCat",
