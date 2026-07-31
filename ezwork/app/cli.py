@@ -42,9 +42,19 @@ from .session import Session, SessionStore
 # ─── paths ────────────────────────────────────────────────────────────────
 
 HOME = str(Path.home())
-CWD = str(Path.cwd())
-SKILLS_DIRS = [Path(HOME) / ".ezwork" / "skills", Path(CWD) / ".ezwork" / "skills"]
 SESSIONS_DIR = str(Path.home() / ".ezwork" / "sessions")
+
+
+def _cwd() -> str:
+    """Current working directory (lazy, may not exist in sandbox)."""
+    try:
+        return str(Path.cwd())
+    except OSError:
+        return HOME
+
+
+def _skills_dirs(cwd: str) -> list[Path]:
+    return [Path(HOME) / ".ezwork" / "skills", Path(cwd) / ".ezwork" / "skills"]
 
 
 # ─── streaming renderer ────────────────────────────────────────────────────
@@ -195,11 +205,11 @@ def build_agent(
 
     tools = _build_tools()
     system_prompt = build_system_prompt(
-        cwd=CWD,
+        cwd=_cwd(),
         home=HOME,
         config_path=str(DEFAULT_CONFIG_PATH),
         sessions_dir=SESSIONS_DIR,
-        skills_dirs=SKILLS_DIRS,
+        skills_dirs=_skills_dirs(_cwd()),
     )
 
     return (
@@ -261,14 +271,14 @@ async def oneshot(
     # Load prior history if continuing a session.
     session: Session
     if session_id:
-        loaded = store.load(CWD, session_id)
+        loaded = store.load(_cwd(), session_id)
         if loaded is None:
-            print(f"[error] session {session_id} not found (cwd {CWD})", file=sys.stderr)
+            print(f"[error] session {session_id} not found (cwd {_cwd()})", file=sys.stderr)
             return 1
         session = loaded
         agent.messages = list(session.messages)
     else:
-        session = Session.new(CWD, model=config.model, provider=config.provider)
+        session = Session.new(_cwd(), model=config.model, provider=config.provider)
 
     try:
         answer = await agent.chat(prompt_text)
@@ -324,9 +334,9 @@ async def repl(
 
     session: Session | None = None
     if session_id:
-        loaded = store.load(CWD, session_id)
+        loaded = store.load(_cwd(), session_id)
         if loaded is None:
-            print(f"[error] session {session_id} not found (cwd {CWD})", file=sys.stderr)
+            print(f"[error] session {session_id} not found (cwd {_cwd()})", file=sys.stderr)
             return 1
         session = loaded
         agent.messages = list(session.messages)
@@ -379,7 +389,7 @@ async def repl(
 
         # Normal chat turn. Create the session lazily on first real message.
         if session is None:
-            session = Session.new(CWD, model=config.model, provider=config.provider)
+            session = Session.new(_cwd(), model=config.model, provider=config.provider)
 
         task = asyncio.ensure_future(agent.chat(line))
         cancelled = False
@@ -439,7 +449,7 @@ def _format_preview(title: str, limit: int = 40) -> str:
 
 
 def _print_sessions(store: SessionStore, limit: int = 10) -> None:
-    sessions = store.list(CWD)
+    sessions = store.list(_cwd())
     if not sessions:
         print("(no sessions for this directory)")
         return
@@ -453,11 +463,11 @@ def _print_sessions(store: SessionStore, limit: int = 10) -> None:
 
 def _resume_cmd(store: SessionStore, arg: str) -> Session | None:
     if arg:
-        loaded = store.load(CWD, arg)
+        loaded = store.load(_cwd(), arg)
         if loaded is None:
             print(f"[error] session {arg} not found")
         return loaded
-    sessions = store.list(CWD)
+    sessions = store.list(_cwd())
     if not sessions:
         print("(no sessions for this directory)")
         return None
@@ -473,7 +483,7 @@ def _resume_cmd(store: SessionStore, arg: str) -> Session | None:
         return None
     if not choice:
         return None
-    loaded = store.load(CWD, choice)
+    loaded = store.load(_cwd(), choice)
     if loaded is None:
         print(f"[error] session {choice} not found")
     return loaded
@@ -486,6 +496,11 @@ def _read_stdin_if_piped() -> str | None:
     if sys.stdin.isatty():
         return None
     try:
+        import select
+
+        r, _, _ = select.select([sys.stdin], [], [], 0)
+        if not r:
+            return None
         return sys.stdin.read()
     except Exception:
         return None
