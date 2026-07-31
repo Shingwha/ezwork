@@ -40,9 +40,11 @@ GUIDELINES = (
     "- After modifying a file, verify the change (re-read or run a check).\n"
     "- When a tool returns an error, read it and recover; do not give up.\n"
     "- Keep answers short; skip restating the user's request.\n"
-    "- For searching, use the dedicated tools: `glob` for file discovery "
-    "(e.g. `**/*.py`) and `grep` for content search (regex, with "
-    "type/context/count modes)."
+    "- Prefer the dedicated search tools over shell commands: `glob` for file "
+    "discovery (e.g. `**/*.py`) and `grep` for content search (regex, with "
+    "type/context/count modes) — they filter noise automatically and give "
+    "cleaner results. Bash `find`/`grep` are allowed only when you need shell "
+    "piping or other bash features (e.g. `grep -r x | wc -l`)."
 )
 
 SUBAGENTS = (
