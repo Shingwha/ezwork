@@ -444,27 +444,54 @@ def _read_piped_stdin() -> str | None:
         return None
 
     import os
-    import select
     import time
 
-    try:
-        select.select([sys.stdin], [], [], 0)
-    except (OSError, ValueError):
-        return None  # Windows: select() only works on sockets
-
+    fd = sys.stdin.fileno()
     chunks: list[str] = []
     deadline = time.monotonic() + _STDIN_TIMEOUT
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        ready, _, _ = select.select([sys.stdin], [], [], remaining)
-        if not ready:
-            break
-        data = os.read(sys.stdin.fileno(), 65536)
-        if not data:  # EOF — the pipe writer closed
-            break
-        chunks.append(data.decode("utf-8", errors="replace"))
+
+    # select() only works on sockets on Windows; probe it and fall back to a
+    # non-blocking drain loop there (os.set_blocking supports pipes on win32).
+    use_select = True
+    try:
+        import select
+
+        select.select([sys.stdin], [], [], 0)
+    except (OSError, ValueError):
+        use_select = False
+
+    if use_select:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select([sys.stdin], [], [], remaining)
+            if not ready:
+                break
+            data = os.read(fd, 65536)
+            if not data:  # EOF — the pipe writer closed
+                break
+            chunks.append(data.decode("utf-8", errors="replace"))
+    else:
+        try:
+            os.set_blocking(fd, False)
+        except OSError:
+            return None  # cannot probe this stdin (e.g. a console handle)
+        try:
+            while True:
+                if time.monotonic() >= deadline:
+                    break
+                try:
+                    data = os.read(fd, 65536)
+                except BlockingIOError:
+                    time.sleep(0.01)
+                    continue
+                if not data:  # EOF — the pipe writer closed
+                    break
+                chunks.append(data.decode("utf-8", errors="replace"))
+        finally:
+            os.set_blocking(fd, True)
+
     return "".join(chunks) if chunks else None
 
 
