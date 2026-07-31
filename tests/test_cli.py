@@ -1,13 +1,15 @@
-"""Tests for the CLI layer: `-p -` stdin prompt handling."""
+"""Tests for the CLI layer: stdin handling for `-p` / `-p -`.
+
+Semantics follow the Claude Code convention (`cat file | claude -p "query"`):
+piped stdin is appended to a `-p "query"` prompt as context, while `-p -`
+treats stdin as the whole prompt.
+"""
 
 from __future__ import annotations
 
-import io
 import os
 import subprocess
 import sys
-
-import pytest
 
 from ezwork.app import cli
 
@@ -19,7 +21,6 @@ class _FakeStdin:
         self._fd = fd
         self._text = text
         self._tty = is_tty
-        self._read_called = False
 
     def isatty(self) -> bool:
         return self._tty
@@ -29,7 +30,6 @@ class _FakeStdin:
         return self._fd
 
     def read(self) -> str:
-        self._read_called = True
         return self._text
 
 
@@ -43,38 +43,65 @@ def _pipe_stdin(monkeypatch, payload: bytes, close_write: bool) -> int:
     return r
 
 
-def test_read_stdin_tty_reads_to_eof(monkeypatch) -> None:
-    """TTY stdin behaves like `cat -`: read until EOF (Ctrl-D)."""
-    monkeypatch.setattr(cli.sys, "stdin", _FakeStdin(text="multi\nline\n", is_tty=True))
-    assert cli._read_stdin() == "multi\nline\n"
+# ─── _read_piped_stdin ────────────────────────────────────────────────────
 
 
-def test_read_stdin_pipe_drains_until_eof(monkeypatch) -> None:
-    """Piped input (`echo x | ezwork -p -`) is read completely."""
+def test_piped_stdin_drains_until_eof(monkeypatch) -> None:
+    """Piped input (`echo x | ezwork`) is read completely."""
     _pipe_stdin(monkeypatch, b"git diff output\n", close_write=True)
-    assert cli._read_stdin() == "git diff output\n"
+    assert cli._read_piped_stdin() == "git diff output\n"
 
 
-def test_read_stdin_pipe_never_closed_times_out(monkeypatch) -> None:
+def test_piped_stdin_never_closed_times_out(monkeypatch) -> None:
     """A never-closing pipe (sandbox/CI) must not hang: drain + timeout."""
     _pipe_stdin(monkeypatch, b"partial data", close_write=False)
     monkeypatch.setattr(cli, "_STDIN_TIMEOUT", 0.1)
-    got = cli._read_stdin()
+    got = cli._read_piped_stdin()
     assert "partial data" in got  # whatever arrived is returned
 
 
-def test_read_stdin_empty_pipe_returns_empty(monkeypatch) -> None:
+def test_piped_stdin_empty_pipe_returns_none(monkeypatch) -> None:
     r, w = os.pipe()
     os.close(w)  # nothing written, writer closed
     monkeypatch.setattr(cli.sys, "stdin", _FakeStdin(fd=r, is_tty=False))
-    assert cli._read_stdin() == ""
+    assert cli._read_piped_stdin() is None
+
+
+def test_piped_stdin_tty_returns_none(monkeypatch) -> None:
+    """Interactive terminals must never block or consume stdin."""
+    monkeypatch.setattr(cli.sys, "stdin", _FakeStdin(text="ignored", is_tty=True))
+    assert cli._read_piped_stdin() is None
+
+
+# ─── _prompt_from_stdin (`-p -`) ──────────────────────────────────────────
+
+
+def test_prompt_from_stdin_pipe(monkeypatch) -> None:
+    _pipe_stdin(monkeypatch, b"summarize this diff", close_write=True)
+    assert cli._prompt_from_stdin() == "summarize this diff"
+
+
+def test_prompt_from_stdin_tty_reads_to_eof(monkeypatch) -> None:
+    """TTY stdin behaves like `cat -`: read until EOF (Ctrl-D)."""
+    monkeypatch.setattr(cli.sys, "stdin", _FakeStdin(text="multi\nline\n", is_tty=True))
+    assert cli._prompt_from_stdin() == "multi\nline\n"
+
+
+def test_prompt_from_stdin_empty_exits_2(monkeypatch) -> None:
+    _pipe_stdin(monkeypatch, b"", close_write=True)
+    try:
+        cli._prompt_from_stdin()
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("expected SystemExit(2)")
+
+
+# ─── main() dispatch ──────────────────────────────────────────────────────
 
 
 def test_main_prompt_dash_dispatches_to_oneshot(monkeypatch) -> None:
-    """`-p -` feeds stdin text into oneshot() instead of the literal '-'.
-
-    Runs the real argparse + main() path with oneshot() stubbed out.
-    """
+    """`-p -` feeds stdin text into oneshot() instead of the literal '-'."""
     calls: dict = {}
 
     async def fake_oneshot(prompt: str, **kwargs) -> int:
@@ -105,14 +132,53 @@ def test_main_prompt_dash_empty_stdin_is_error(monkeypatch) -> None:
     assert called["n"] == 0
 
 
-def test_main_prompt_literal_dash_is_read_from_stdin() -> None:
-    """End-to-end via subprocess: `echo hi | ezwork -p -` reads the pipe.
+def test_main_prompt_query_merges_piped_context(monkeypatch) -> None:
+    """`cat file | ezwork -p "query"` appends piped content as context."""
+    calls: dict = {}
 
-    The prompt is non-empty so it proceeds into oneshot(); that would call the
-    model, so we only assert the stdin plumbing works by checking the exit
-    path for a *missing* config error is NOT hit with a prompt error. Simpler:
-    empty stdin must exit 2 (no model call, no config needed).
-    """
+    async def fake_oneshot(prompt: str, **kwargs) -> int:
+        calls["prompt"] = prompt
+        return 0
+
+    _pipe_stdin(monkeypatch, b"line1\nline2\n", close_write=True)
+    monkeypatch.setattr(cli, "oneshot", fake_oneshot)
+    monkeypatch.setattr(cli.sys, "argv", ["ezwork", "-p", "summarize"])
+    assert cli.main() == 0
+    assert calls["prompt"] == "summarize\n\nline1\nline2\n"
+
+
+def test_main_prompt_query_without_pipe_is_unchanged(monkeypatch) -> None:
+    """No piped stdin: `-p "query"` stays exactly the query."""
+    calls: dict = {}
+
+    async def fake_oneshot(prompt: str, **kwargs) -> int:
+        calls["prompt"] = prompt
+        return 0
+
+    monkeypatch.setattr(cli.sys, "stdin", _FakeStdin(text="", is_tty=True))
+    monkeypatch.setattr(cli, "oneshot", fake_oneshot)
+    monkeypatch.setattr(cli.sys, "argv", ["ezwork", "-p", "hello"])
+    assert cli.main() == 0
+    assert calls["prompt"] == "hello"
+
+
+def test_main_prompt_query_empty_pipe_is_unchanged(monkeypatch) -> None:
+    """Empty piped stdin: `-p "query"` stays exactly the query."""
+    calls: dict = {}
+
+    async def fake_oneshot(prompt: str, **kwargs) -> int:
+        calls["prompt"] = prompt
+        return 0
+
+    _pipe_stdin(monkeypatch, b"", close_write=True)
+    monkeypatch.setattr(cli, "oneshot", fake_oneshot)
+    monkeypatch.setattr(cli.sys, "argv", ["ezwork", "-p", "hello"])
+    assert cli.main() == 0
+    assert calls["prompt"] == "hello"
+
+
+def test_main_prompt_dash_empty_stdin_e2e() -> None:
+    """End-to-end: `ezwork -p - < /dev/null` exits 2 without a model call."""
     result = subprocess.run(
         [sys.executable, "-m", "ezwork.app.cli", "-p", "-"],
         input=b"",

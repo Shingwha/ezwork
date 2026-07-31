@@ -5,6 +5,8 @@
                                          session id + tokens to stderr
     ezwork -p -                             oneshot, prompt read from stdin
                                          (e.g. `git diff | ezwork -p -`)
+    cat file | ezwork -p "summarize"        oneshot; piped content is appended
+                                         as context (Claude Code convention)
     ezwork -p "continue..." -s <id>         oneshot, continue an existing session
     ezwork --model X                        override model for this run
     ezwork --no-session                     oneshot without persisting a session
@@ -424,16 +426,19 @@ def _enable_ansi() -> None:
         os.system("")
 
 
-def _read_stdin() -> str:
-    """Read prompt text from stdin for `-p -` (like `cat -`).
+def _read_piped_stdin() -> str | None:
+    """Return piped/redirected stdin content, or None if there is none.
 
-    On a TTY this reads interactively until EOF (Ctrl-D). Piped input is
-    drained with a short timeout so a never-closing pipe (sandbox, CI) cannot
-    hang the process; platforms without select() on pipes (Windows) fall back
-    to a plain read-to-EOF.
+    Used for two purposes: `-p -` (stdin is the whole prompt) and piped
+    context with `-p "query"` (stdin content is appended as context, matching
+    `cat file | claude -p "query"`).
+
+    Never blocks indefinitely: piped input is drained with a short timeout so
+    a never-closing pipe (sandbox, CI) cannot hang the process. Returns None
+    when stdin is a TTY, has no data, or select() can't probe it (Windows).
     """
     if sys.stdin.isatty():
-        return sys.stdin.read()
+        return None
 
     import os
     import select
@@ -442,7 +447,7 @@ def _read_stdin() -> str:
     try:
         select.select([sys.stdin], [], [], 0)
     except (OSError, ValueError):
-        return sys.stdin.read()  # Windows: select() only works on sockets
+        return None  # Windows: select() only works on sockets
 
     chunks: list[str] = []
     deadline = time.monotonic() + _STDIN_TIMEOUT
@@ -457,7 +462,24 @@ def _read_stdin() -> str:
         if not data:  # EOF — the pipe writer closed
             break
         chunks.append(data.decode("utf-8", errors="replace"))
-    return "".join(chunks)
+    return "".join(chunks) if chunks else None
+
+
+def _prompt_from_stdin() -> str:
+    """Read the whole prompt from stdin for `-p -` (like `cat -`).
+
+    On a TTY this reads interactively until EOF (Ctrl-D); piped input is
+    drained via _read_piped_stdin(). Raises SystemExit(2) on empty input so
+    we never send an empty prompt (or a literal '-') to the model.
+    """
+    if sys.stdin.isatty():
+        data = sys.stdin.read()
+    else:
+        data = _read_piped_stdin() or ""
+    if not data.strip():
+        print("error: -p - received no input on stdin", file=sys.stderr)
+        raise SystemExit(2)
+    return data
 
 
 def main() -> int:
@@ -489,10 +511,17 @@ def main() -> int:
     if args.prompt is not None:
         prompt = args.prompt
         if prompt == "-":
-            prompt = _read_stdin()
-            if not prompt.strip():
-                print("error: -p - received no input on stdin", file=sys.stderr)
-                return 2
+            # `-p -`: stdin is the whole prompt (like `cat -`).
+            try:
+                prompt = _prompt_from_stdin()
+            except SystemExit as exc:
+                return int(exc.code)
+        else:
+            # `-p "query"` with piped stdin: append the content as context,
+            # matching `cat file | claude -p "query"` (Claude Code convention).
+            piped = _read_piped_stdin()
+            if piped:
+                prompt = f"{prompt}\n\n{piped}"
         try:
             return asyncio.run(
                 oneshot(
