@@ -200,6 +200,33 @@ def _closest_line_hint(text: str, old: str) -> str:
     return ""
 
 
+def _normalise(text: str) -> tuple[str, list[int]]:
+    """Return CRLF→LF text plus a map from each norm index to its raw index.
+
+    A CRLF pair collapses to a single '\n' whose raw index points at the '\r',
+    so a norm span maps back to raw text losslessly (see _raw_span).
+    """
+    norm: list[str] = []
+    idx: list[int] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] == "\r" and i + 1 < n and text[i + 1] == "\n":
+            norm.append("\n")
+            idx.append(i)
+            i += 2
+        else:
+            norm.append(text[i])
+            idx.append(i)
+            i += 1
+    return "".join(norm), idx
+
+
+def _raw_span(text: str, idx: list[int], s: int, e: int) -> tuple[int, int]:
+    """Raw-text span corresponding to the normalised segment [s, e)."""
+    last = idx[e - 1]
+    return idx[s], last + (2 if text[last] == "\r" else 1)
+
+
 _EDIT_PARAMS = {
     "path": {"type": "string", "description": "File path to edit"},
     "old_string": {
@@ -255,18 +282,32 @@ class EditTool(Tool):
     def _execute(self, args: dict) -> str:
         p = require_file(Path(args["path"]))
         with _edit_lock_for(p):
-            text = p.read_text(encoding="utf-8")
-            # File content arrives as \n (universal newlines); normalise the
-            # pattern so CRLF from the caller still matches.
+            # Read with newline="" so CRLF survives the round-trip; the default
+            # universal-newline mode would strip \r before we ever match.
+            with p.open("r", encoding="utf-8", newline="") as fh:
+                raw = fh.read()
+            # Match in CRLF-normalised space, then map spans back onto raw text.
+            norm, idx = _normalise(raw)
             old = args["old_string"].replace("\r\n", "\n")
             new = args["new_string"]
-            if old not in text:
-                raise ToolError(self._not_found_msg(text, old, new, p.name), "not_found")
-            count = text.count(old)
+            if not old:
+                raise ToolError("old_string must not be empty", "not_found")
+            if old not in norm:
+                raise ToolError(self._not_found_msg(norm, old, new, p.name), "not_found")
+            count = norm.count(old)
             replace_all = args.get("all", False)
             if not replace_all and count > 1:
-                raise ToolError(self._not_unique_msg(text, old, count), "not_unique")
-            replacement = text.replace(old, new, -1 if replace_all else 1)
-            p.write_text(replacement, encoding="utf-8")
+                raise ToolError(self._not_unique_msg(norm, old, count), "not_unique")
             actual = count if replace_all else 1
+            spans: list[tuple[int, int]] = []
+            pos = 0
+            for _ in range(actual):
+                s = norm.index(old, pos)
+                e = s + len(old)
+                spans.append(_raw_span(raw, idx, s, e))
+                pos = e
+            # Apply back-to-front so earlier spans stay valid.
+            for s, e in reversed(spans):
+                raw = raw[:s] + new + raw[e:]
+            p.write_text(raw, encoding="utf-8", newline="")
             return f"Replaced {actual} occurrence(s) in {p.name}"
