@@ -67,6 +67,11 @@ class OpenAIProvider:
     def model(self) -> str:
         return self._model
 
+    @model.setter
+    def model(self, value: str) -> None:
+        """Runtime model override (e.g. `ezwork --model X`)."""
+        self._model = value
+
     @classmethod
     def _load_exc_classes(cls) -> tuple[type[Exception], ...]:
         if cls._exc_classes is None:

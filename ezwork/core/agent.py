@@ -63,6 +63,7 @@ from .event import (
 )
 from .message import (
     assistant_text,
+    assistant_with_tool_calls,
     tool_result,
     user_text,
     user_with_images,
@@ -424,7 +425,7 @@ class AgentLoop:
     @property
     def iteration(self) -> int:
         """Number of LLM iterations completed in the last chat() loop."""
-        return self._iteration_count if self._iteration_count else 0
+        return self._iteration_count
 
     @property
     def last_usage(self) -> Usage | None:
@@ -437,11 +438,15 @@ class AgentLoop:
 
 def _assistant_msg_from_response(response: Response, *, with_tool_calls: bool) -> dict:
     """Build the assistant message to append to history from a Response."""
+    if with_tool_calls:
+        return assistant_with_tool_calls(
+            content=response.content,
+            tool_calls=response.tool_calls or [],
+            reasoning_content=response.reasoning_content,
+        )
     msg: dict = {"role": "assistant", "content": response.content or ""}
     if response.reasoning_content:
         msg["reasoning_content"] = response.reasoning_content
-    if with_tool_calls:
-        msg["tool_calls"] = response.tool_calls
     return msg
 
 

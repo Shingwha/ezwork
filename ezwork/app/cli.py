@@ -98,7 +98,7 @@ def build_agent(
     """
     provider = config.build_provider()
     if model_override:
-        provider._model = model_override  # temporary run override
+        provider.model = model_override  # temporary run override
 
     cfg = LoopConfig(
         max_retries=2,
@@ -446,6 +446,22 @@ def _enable_ansi() -> None:
 def _read_stdin_if_piped() -> str | None:
     if sys.stdin.isatty():
         return None
+    if sys.platform == "win32":
+        # select() only works on sockets on Windows (pipes raise OSError),
+        # so probe via a short-lived daemon thread instead. If nothing
+        # arrives within the timeout, treat as no input.
+        result: list[str] = []
+
+        def _read() -> None:
+            try:
+                result.append(sys.stdin.read())
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_read, daemon=True)
+        t.start()
+        t.join(timeout=0.2)
+        return result[0] if result else None
     try:
         import select
 

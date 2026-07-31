@@ -23,6 +23,8 @@ itself does no retrying — that's a caller-side policy.
 
 from __future__ import annotations
 
+import asyncio
+import random
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Protocol, runtime_checkable
 
@@ -273,9 +275,6 @@ async def retry_stream(
         chunks = retry_stream(lambda: provider.stream(...), provider.is_retriable)
         response = await collect_stream(chunks)
     """
-    import asyncio
-    import random
-
     last_exc: Exception | None = None
     for attempt in range(max_retries + 1):
         iterator: AsyncIterator[StreamChunk] | None = None
