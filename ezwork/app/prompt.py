@@ -18,7 +18,8 @@ prefix-cache hits):
     environment   (20)  cwd / home / config path / sessions path / skills dirs
     subagents     (25)  how to spawn a sub-agent via `ezwork -p` from bash
     skills        (30)  skill discovery + read-based invocation
-    agents        (40)  merged ~/.ezwork/AGENTS.md + ./AGENTS.md
+    agents        (40)  memory guide + merged global ~/.ezwork/AGENTS.md
+                        and nearest project AGENTS.md (dynamic, last)
 """
 
 from __future__ import annotations
@@ -40,9 +41,8 @@ GUIDELINES = (
     "- When a tool returns an error, read it and recover; do not give up.\n"
     "- Keep answers short; skip restating the user's request.\n"
     "- For searching, use the dedicated tools: `glob` for file discovery "
-    "(e.g. `**/*.py`) and `grep` for content search (regex, with type/context/"
-    "count modes). They are pure Python and work the same on every platform — "
-    "do not rely on shell `grep -r`/`find`, which may not exist on Windows."
+    "(e.g. `**/*.py`) and `grep` for content search (regex, with "
+    "type/context/count modes)."
 )
 
 SUBAGENTS = (
@@ -106,6 +106,28 @@ SUBAGENTS = (
 )
 
 
+AGENTS_GUIDE = (
+    "Persistent memory (survives across sessions and restarts) — the "
+    "following AGENTS.md contents are injected below:\n"
+    "- Global: ~/.ezwork/AGENTS.md — durable facts about the user, the "
+    "machine and the environment (e.g. proxy setup, git gotchas, tool "
+    "preferences). Applies in every project.\n"
+    "- Project: <project root>/AGENTS.md — conventions, decisions and "
+    "gotchas specific to one project. Looked up from the working "
+    "directory upward; the nearest AGENTS.md wins.\n"
+    "- WRITE to these files when you learn something durable: a user "
+    "preference, an environment quirk, a recurring gotcha, a project "
+    "convention. Update the file directly with the read + edit/write "
+    "tools. Keep entries short, factual, organised with ## headers; "
+    "append or edit precisely — never rewrite unrelated content.\n"
+    "- Do NOT write: transient task state, code facts that are obvious "
+    "from the codebase, or anything the user did not confirm matters.\n"
+    "- On conflict: project memory wins for project-specific matters; "
+    "global memory wins for user/environment facts. Both are advisory — "
+    "explicit user instructions in the current conversation always win."
+)
+
+
 def _discover_skills(skills_dirs: list[Path]) -> list[tuple[str, str]]:
     """Find skills: any subdirectory of a skills dir that contains SKILL.md.
     Returns [(name, skill_md_path), ...]. Earlier dirs win on name conflicts
@@ -138,6 +160,8 @@ def _render_skills_block(skills_dirs: list[Path]) -> str:
     if not skills:
         return "(no skills available)"
     lines = [
+        "Skills are reusable capability packs — each is a directory with a "
+        "SKILL.md that describes what it does and how to use it.",
         "To use a skill, read its SKILL.md with the read tool "
         '(e.g. read(path="<path>")) and then follow its instructions exactly. '
         "Never assume skill content — always read SKILL.md before acting.",
@@ -149,21 +173,39 @@ def _render_skills_block(skills_dirs: list[Path]) -> str:
     return "\n".join(lines)
 
 
+def _find_project_agents(cwd: str) -> Path | None:
+    """Nearest AGENTS.md walking up from cwd (project memory)."""
+    for d in [Path(cwd), *Path(cwd).resolve().parents]:
+        candidate = d / "AGENTS.md"
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
 def _render_agents(home: str, cwd: str) -> str:
-    """Merge global ~/.ezwork/AGENTS.md and project ./AGENTS.md (if present)."""
-    paths = [Path(home) / ".ezwork" / "AGENTS.md", Path(cwd) / "AGENTS.md"]
+    """Persistent-memory guide + merged global ~/.ezwork/AGENTS.md and the
+    nearest project AGENTS.md, each labelled with its source path so the
+    agent knows where to write."""
     parts: list[str] = []
-    for p in paths:
+    global_p = Path(home) / ".ezwork" / "AGENTS.md"
+    for label, p in (("Global memory", global_p), ("Project memory", _find_project_agents(cwd))):
+        if p is None:
+            continue
         try:
             if p.exists() and p.is_file():
                 txt = p.read_text(encoding="utf-8").strip()
                 if txt:
-                    parts.append(txt)
+                    parts.append(f"## {label} ({p})\n\n{txt}")
         except OSError:
             continue
     if not parts:
-        return "(no AGENTS.md)"
-    return "\n\n---\n\n".join(parts)
+        contents = "(no AGENTS.md files yet — create ~/.ezwork/AGENTS.md or <project>/AGENTS.md to persist facts)"
+    else:
+        contents = "\n\n---\n\n".join(parts)
+    return AGENTS_GUIDE + "\n\n" + contents
 
 
 def build_system_prompt(
