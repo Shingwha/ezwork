@@ -63,7 +63,6 @@ from .event import (
 )
 from .message import (
     assistant_text,
-    assistant_with_tool_calls,
     tool_result,
     user_text,
     user_with_images,
@@ -438,16 +437,11 @@ class AgentLoop:
 
 def _assistant_msg_from_response(response: Response, *, with_tool_calls: bool) -> dict:
     """Build the assistant message to append to history from a Response."""
-    if not with_tool_calls:
-        msg: dict = {"role": "assistant", "content": response.content or ""}
-        if response.reasoning_content:
-            msg["reasoning_content"] = response.reasoning_content
-        return msg
-    # tool-call turn — preserve reasoning_content and the wire tool_calls
-    msg = {"role": "assistant", "content": response.content or ""}
+    msg: dict = {"role": "assistant", "content": response.content or ""}
     if response.reasoning_content:
         msg["reasoning_content"] = response.reasoning_content
-    msg["tool_calls"] = response.tool_calls
+    if with_tool_calls:
+        msg["tool_calls"] = response.tool_calls
     return msg
 
 

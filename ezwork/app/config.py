@@ -171,15 +171,9 @@ class Config:
             )
 
         base_url = self.effective_base_url()
-        # OpenAIProvider is the only factory that takes base_url positionally;
-        # the vendor factories accept it as a keyword.
-        if self.provider == "openai":
-            return OpenAIProvider(
-                api_key=self.api_key,
-                model=self.model or "gpt-4o",
-                base_url=base_url,
-                extra_body=self.extra_body or None,
-            )
+        # Every factory (OpenAIProvider and the vendor factories) accepts
+        # api_key / model / base_url / extra_body as keywords — no special
+        # cases needed per provider.
         kwargs: dict[str, Any] = {"api_key": self.api_key}
         if self.model:
             kwargs["model"] = self.model

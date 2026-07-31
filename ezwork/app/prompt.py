@@ -39,9 +39,10 @@ GUIDELINES = (
     "- After modifying a file, verify the change (re-read or run a check).\n"
     "- When a tool returns an error, read it and recover; do not give up.\n"
     "- Keep answers short; skip restating the user's request.\n"
-    "- For searching, use the bash tool: `grep -r` for content search and "
-    "`find` / shell globbing (e.g. `ls **/*.py`) for file discovery. These "
-    "are faster and more flexible than reading files one by one."
+    "- For searching, use the dedicated tools: `glob` for file discovery "
+    "(e.g. `**/*.py`) and `grep` for content search (regex, with type/context/"
+    "count modes). They are pure Python and work the same on every platform — "
+    "do not rely on shell `grep -r`/`find`, which may not exist on Windows."
 )
 
 SUBAGENTS = (

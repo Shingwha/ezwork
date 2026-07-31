@@ -30,11 +30,12 @@ import asyncio
 import json
 import signal
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from ezwork import __version__
 from ezwork.core import Agent, LoopConfig, ToolRegistry
-from ezwork.tools import BashTool, EditTool, ReadTool, WriteTool
+from ezwork.tools import BashTool, EditTool, GlobTool, GrepTool, ReadTool, WriteTool
 
 from .config import DEFAULT_CONFIG_PATH, Config
 from .prompt import build_system_prompt
@@ -172,7 +173,7 @@ def _oneline(text: str, limit: int) -> str:
 
 def _build_tools() -> ToolRegistry:
     reg = ToolRegistry()
-    for t in [ReadTool(), WriteTool(), EditTool(), BashTool()]:
+    for t in [ReadTool(), WriteTool(), EditTool(), BashTool(), GlobTool(), GrepTool()]:
         reg.register(t)
     return reg
 
@@ -182,6 +183,7 @@ def build_agent(
     *,
     render: bool,
     model_override: str | None = None,
+    on_error: Callable[[str], None] | None = None,
 ) -> Agent:
     """Build a fully-wired AgentLoop.
 
@@ -190,6 +192,10 @@ def build_agent(
                     the caller prints the final answer afterwards). This avoids
                     the whole "silent flag" branch — oneshot simply has no
                     renderer to leak anything.
+    on_error    -> optional callback invoked once per provider ErrorEvent.
+                   Oneshot uses this to surface LLM failures on stderr (the
+                   renderer only exists in REPL mode, so without it a provider
+                   error would otherwise be completely silent).
     """
     provider = config.build_provider()
     if model_override:
@@ -203,6 +209,12 @@ def build_agent(
     )
     if render:
         cfg.emit.append(StreamRenderer())
+    if on_error is not None:
+        cfg.emit.append(
+            lambda e: on_error(e.error)
+            if getattr(e, "type", None) == "error" and getattr(e, "error", None)
+            else None
+        )
 
     tools = _build_tools()
     system_prompt = build_system_prompt(
@@ -266,7 +278,10 @@ async def oneshot(
 ) -> int:
     """Run one turn; print the answer to stdout, session id + tokens to stderr."""
     config = load_config_or_exit()
-    agent = build_agent(config, render=False, model_override=model_override)
+    errors: list[str] = []
+    agent = build_agent(
+        config, render=False, model_override=model_override, on_error=errors.append
+    )
     store = SessionStore()
 
     # Load prior history if continuing a session.
@@ -285,11 +300,11 @@ async def oneshot(
         answer = await agent.chat(prompt_text)
     except asyncio.CancelledError:
         print("\n(interrupted)", file=sys.stderr)
-        _maybe_save(store, session, agent.messages, no_session)
+        _persist_session(store, session, agent.messages, no_session=no_session)
         return 130
     except Exception as e:
         print(f"[error] {e}", file=sys.stderr)
-        _maybe_save(store, session, agent.messages, no_session)
+        _persist_session(store, session, agent.messages, no_session=no_session)
         return 1
 
     # Output layout (human view in a terminal):
@@ -300,12 +315,18 @@ async def oneshot(
     # stdout flushes before stderr, so the answer appears on top. Scripts that
     # want only the answer just read stdout; those wanting the session id grep
     # stderr for '^session:'.
+    if errors:
+        # Provider failed: the loop stops with an empty/partial answer and no
+        # renderer is attached in oneshot mode, so surface the error here and
+        # exit non-zero — a script must not mistake this for a real answer.
+        print(f"[provider error] {errors[0]}", file=sys.stderr)
+        _persist_session(store, session, agent.messages, no_session=no_session)
+        return 1
     print(answer, flush=True)
     u = agent.total_usage
     meta_lines = [f"[tokens: prompt={u.prompt_tokens} completion={u.completion_tokens}]"]
     if not no_session:
-        session.messages = list(agent.messages)
-        store.save(session)
+        _persist_session(store, session, agent.messages)
         meta_lines.append(f"session: {session.id}")
     print("────────────────", file=sys.stderr)
     for line in meta_lines:
@@ -313,8 +334,15 @@ async def oneshot(
     return 0
 
 
-def _maybe_save(store: SessionStore, session: Session, messages, no_session: bool) -> None:
-    if no_session or not messages:
+def _persist_session(
+    store: SessionStore,
+    session: Session | None,
+    messages,
+    *,
+    no_session: bool = False,
+) -> None:
+    """Save the session if there is one and anything to save. Never raises."""
+    if no_session or session is None or not messages:
         return
     session.messages = list(messages)
     try:
@@ -353,7 +381,7 @@ async def repl(
             line = input("\n> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
-            _save_repl_session(store, session, agent.messages)
+            _persist_session(store, session, agent.messages)
             return 0
         if not line:
             continue
@@ -362,7 +390,7 @@ async def repl(
         cmd_lower = cmd.lower()
 
         if cmd_lower in ("/exit", "/quit"):
-            _save_repl_session(store, session, agent.messages)
+            _persist_session(store, session, agent.messages)
             return 0
         if cmd_lower == "/clear":
             agent.reset()
@@ -411,17 +439,7 @@ async def repl(
         finally:
             signal.signal(signal.SIGINT, original)
 
-        _save_repl_session(store, session, agent.messages)
-
-
-def _save_repl_session(store: SessionStore, session: Session | None, messages) -> None:
-    if session is None or not messages:
-        return
-    session.messages = list(messages)
-    try:
-        store.save(session)
-    except Exception:
-        pass
+        _persist_session(store, session, agent.messages)
 
 
 def _print_help() -> None:
@@ -449,6 +467,11 @@ def _format_preview(title: str, limit: int = 40) -> str:
     return text[:limit] + ("..." if len(text) > limit else "")
 
 
+def _format_session_line(s: Session) -> str:
+    """One line for the /sessions and /resume listings."""
+    return f"  {s.id}  {_format_time(s.updated_at)}  {_format_preview(s.title)}"
+
+
 def _print_sessions(store: SessionStore, limit: int = 10) -> None:
     sessions = store.list(_cwd())
     if not sessions:
@@ -457,9 +480,7 @@ def _print_sessions(store: SessionStore, limit: int = 10) -> None:
     shown = sessions[:limit]
     print(f"sessions for this directory (showing {len(shown)} of {len(sessions)}):")
     for s in shown:
-        print(
-            f"  {s.id}  {_format_time(s.updated_at)}  {_format_preview(s.title)}"
-        )
+        print(_format_session_line(s))
 
 
 def _resume_cmd(store: SessionStore, arg: str) -> Session | None:
@@ -474,9 +495,7 @@ def _resume_cmd(store: SessionStore, arg: str) -> Session | None:
         return None
     print("recent sessions (enter an id to resume, or blank to cancel):")
     for s in sessions[:10]:
-        print(
-            f"  {s.id}  {_format_time(s.updated_at)}  {_format_preview(s.title)}"
-        )
+        print(_format_session_line(s))
     try:
         choice = input("\nresume> ").strip()
     except (EOFError, KeyboardInterrupt):

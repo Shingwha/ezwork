@@ -1,25 +1,34 @@
-"""Built-in tools: read, write, edit, bash.
+"""Built-in tools: read, write, edit, bash, glob, grep.
 
 A sibling package to `providers/`. The kernel ships NO tools; these are the
 reference implementations an app would bundle. Register them like:
 
     from ezwork.core import ToolRegistry
-    from tools import ReadTool, WriteTool, EditTool, BashTool
+    from tools import ReadTool, WriteTool, EditTool, BashTool, GlobTool, GrepTool
 
     reg = ToolRegistry()
-    for t in [ReadTool(), WriteTool(), EditTool(), BashTool()]:
+    for t in [ReadTool(), WriteTool(), EditTool(), BashTool(), GlobTool(), GrepTool()]:
         reg.register(t)
 """
 
 from __future__ import annotations
 
-__all__ = ["ReadTool", "WriteTool", "EditTool", "BashTool"]
+__all__ = [
+    "ReadTool",
+    "WriteTool",
+    "EditTool",
+    "BashTool",
+    "GlobTool",
+    "GrepTool",
+]
 
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "ReadTool": (".file", "ReadTool"),
     "WriteTool": (".file", "WriteTool"),
     "EditTool": (".file", "EditTool"),
     "BashTool": (".bash", "BashTool"),
+    "GlobTool": (".glob", "GlobTool"),
+    "GrepTool": (".grep", "GrepTool"),
 }
 
 
@@ -33,3 +42,7 @@ def __getattr__(name: str):
         globals()[name] = value
         return value
     raise AttributeError(f"module 'tools' has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(list(globals().keys()) + list(_LAZY_IMPORTS.keys()))
