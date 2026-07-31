@@ -32,6 +32,7 @@ import signal
 import sys
 from pathlib import Path
 
+from ezwork import __version__
 from ezwork.core import Agent, LoopConfig, ToolRegistry
 from ezwork.tools import BashTool, EditTool, ReadTool, WriteTool
 
@@ -526,6 +527,12 @@ def main() -> int:
         "--no-session",
         action="store_true",
         help="one-shot mode: do not persist a session.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+        help="show version and exit.",
     )
     args = parser.parse_args()
 

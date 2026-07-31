@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ezwork"
-version = "0.4.0"
+version = "0.0.1"
 description = "Ezwork — a lean agent kernel with a minimal CLI app on top."
 readme = "README.md"
 requires-python = ">=3.12"
