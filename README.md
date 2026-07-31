@@ -71,12 +71,13 @@ restart). Streaming text prints live; tool calls show as `-> name(args)` /
 
 ### One-shot is script-friendly
 
-`ezwork -p` writes the answer to **stdout** and the session id + token usage to
-**stderr**, so a script can keep a conversation going across calls:
+`ezwork -p` writes the answer to **stdout**; the session id + token usage go to
+**stderr**, printed as a `session: <id>` line. No parsing needed — read the id
+straight off the stderr and pass it to `-s`:
 
 ```bash
-SID=$(ezwork -p "summarize this repo" 2>&1 >/dev/null | grep '^session:' | cut -d' ' -f2)
-ezwork -p "now list its open todos" -s "$SID"
+ezwork -p "summarize this repo"        # stderr → session: session_xxxxx
+ezwork -p "now list its open todos" -s session_xxxxx
 ```
 
 ### Sub-agents are just sessions
@@ -87,9 +88,41 @@ workflow, spin up a one-shot session and keep its id — same config, same tools
 isolated history:
 
 ```bash
-SUB=$(ezwork -p "analyse the auth module" 2>&1 >/dev/null | grep '^session:' | cut -d' ' -f2)
-ezwork -p "now write tests for it" -s "$SUB"
+ezwork -p "analyse the auth module"    # stderr → session: session_xxxxx
+ezwork -p "now write tests for it" -s session_xxxxx
 ```
+
+**Prompting rules for sub-agents** — a sub-agent cannot see the parent
+conversation, so every sub-agent prompt must be a fully self-contained
+specification:
+
+1. **Goal** — what needs to be done.
+2. **Output format** — what the final answer should look like (e.g. "list the
+   files", "print the diff", "write a summary").
+3. **Workflow** — the steps to follow, especially order of operations.
+4. **Tool restrictions** — which tools to use or avoid (e.g. "read-only, do
+   not modify any files", "use grep for search, do not read files one by one",
+   "use the edit tool, do not rewrite whole files").
+
+**Output rules** — the sub-agent's output is the *only* thing the parent sees,
+so it must be complete and self-explanatory: structure it with headings, lists,
+code blocks or tables; always summarise what was done at the end; say so
+explicitly if a step failed or was skipped; and when reporting file changes,
+include the path and a brief description of each change.
+
+Good example:
+
+```bash
+ezwork -p "Analyse the auth module in src/auth/.
+1. Read src/auth/__init__.py and list all public functions.
+2. For each function, check if it has a unit test in tests/test_auth.py.
+3. Report any function that lacks a test, using this format:
+   [missing-test] <function_name> — <reason>
+Do not modify any files."
+```
+
+If the task is complex, break it into multiple sub-agent calls rather than one
+giant prompt, and use follow-up calls (`-s`) to build on previous results.
 
 ## Hello agent (no CLI)
 
