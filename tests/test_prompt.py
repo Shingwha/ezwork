@@ -127,3 +127,4 @@ def test_discover_skills_skips_dirs_without_skill_md(tmp_path):
     (tmp_path / "skills").mkdir()
     (tmp_path / "skills" / "nope").mkdir()
     assert _discover_skills([tmp_path / "skills"]) == []
+
