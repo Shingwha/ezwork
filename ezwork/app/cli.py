@@ -29,6 +29,7 @@ import argparse
 import asyncio
 import signal
 import sys
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -164,6 +165,20 @@ def load_config_or_exit() -> Config:
     return config
 
 
+def _warmup_provider(agent: Agent) -> None:
+    """Preload the provider's HTTP client in a background thread.
+
+    The openai SDK (~1s import) is lazy-loaded on the first request. In REPL
+    mode we kick it off while the user is typing their first message, so the
+    first chat turn doesn't pay the import cost. Daemon thread: if the user
+    quits before it finishes, nothing is left behind.
+    """
+    ensure = getattr(getattr(agent, "provider", None), "_ensure_client", None)
+    if ensure is None:
+        return
+    threading.Thread(target=ensure, daemon=True).start()
+
+
 # ─── modes ─────────────────────────────────────────────────────────────────
 
 
@@ -258,6 +273,7 @@ async def repl(
     config = load_config_or_exit()
     agent = build_agent(config, render=True, model_override=model_override)
     store = SessionStore()
+    _warmup_provider(agent)  # preload openai SDK while the user types
 
     session: Session | None = None
     ui = UI()

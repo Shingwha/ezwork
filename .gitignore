@@ -48,6 +48,7 @@ coverage.xml
 .zcode/
 .less/
 *.local
+plans/
 
 # OS
 Thumbs.db
