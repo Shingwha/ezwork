@@ -173,11 +173,20 @@ One minimal, opinionated way to run the kernel — and the `ezwork` command:
 
 Provider errors never crash the process: the kernel emits `ErrorEvent`, the CLI's renderer prints it, and the loop keeps going.
 
-## 9. Testing
+## 9. Python 环境管理（用户约定）
+
+本项目所有 Python 相关操作一律用 **uv** 管理，不要用 pip / 系统 Python 直接装包：
+
+- 运行命令/脚本：`uv run <cmd>`（如 `uv run pytest`、`uv run python ...`）
+- 安装/移除依赖：`uv add <pkg>` / `uv remove <pkg>`（依赖声明在 pyproject.toml）
+- 安装 CLI 工具：`uv tool install <pkg>`
+- Python 版本：用 `uv python` 管理，勿手动改系统解释器
+
+## 10. Testing
 
 `uv run pytest`. Tests are async via `pytest-asyncio` (auto mode) and use a `MockProvider` (`tests/__init__.py`) that replays a scripted stream — no real LLM calls. Prefer testing through the public API: build an `AgentLoop` with a `MockProvider`, exercise it, assert on `agent.messages` and emitted events.
 
-## 10. Adding things
+## 11. Adding things
 
 - **Tool** — instantiate/subclass `Tool`, register into a `ToolRegistry`.
 - **Provider** — OpenAI-compatible vendors need only a factory + optional `ThinkingPreset` (see [docs/providers.md](docs/providers.md)); non-compatible vendors implement the `Provider.stream()` protocol and convert messages at the boundary.
