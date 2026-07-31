@@ -1,14 +1,19 @@
-"""Built-in tools: read, write, edit, bash, glob, grep.
+"""Built-in tools: read, write, edit, bash.
 
 A sibling package to `providers/`. The kernel ships NO tools; these are the
 reference implementations an app would bundle. Register them like:
 
     from ezwork.core import ToolRegistry
-    from tools import ReadTool, WriteTool, EditTool, BashTool, GlobTool, GrepTool
+    from tools import ReadTool, WriteTool, EditTool, BashTool
 
     reg = ToolRegistry()
-    for t in [ReadTool(), WriteTool(), EditTool(), BashTool(), GlobTool(), GrepTool()]:
+    for t in [ReadTool(), WriteTool(), EditTool(), BashTool()]:
         reg.register(t)
+
+Search (grep/find) is intentionally left to the bash tool: a single
+general-purpose shell covers content search, file discovery AND piping
+(`grep -rn x | wc -l`), with per-family syntax hints baked into the bash
+tool description (grep/find, Select-String, findstr).
 """
 
 from __future__ import annotations
@@ -18,8 +23,6 @@ __all__ = [
     "WriteTool",
     "EditTool",
     "BashTool",
-    "GlobTool",
-    "GrepTool",
 ]
 
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
@@ -27,8 +30,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "WriteTool": (".file", "WriteTool"),
     "EditTool": (".file", "EditTool"),
     "BashTool": (".bash", "BashTool"),
-    "GlobTool": (".glob", "GlobTool"),
-    "GrepTool": (".grep", "GrepTool"),
 }
 
 

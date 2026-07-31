@@ -373,9 +373,10 @@ _BASE_DESC = (
 # once when the tool is constructed; the same shell backs the session.
 _SHELL_HINTS: dict[str, str] = {
     "bash": (
-        " Active shell: bash (POSIX). Write Unix-style commands: `ls`, `grep -r`, "
-        "`find . -name '*.py'`, `cat`, pipes `|`, and-chains `&&`, `export VAR=val`. "
-        "Bare `cd` and `export` persist across calls."
+        " Active shell: bash (POSIX). Write Unix-style commands: `ls`, "
+        "`grep -rn 'pattern' --exclude-dir={node_modules,.git,__pycache__}`, "
+        "`find . -name '*.py'`, `cat`, pipes `|`, and-chains `&&`, "
+        "`export VAR=val`. Bare `cd` and `export` persist across calls."
     ),
     "sh": (
         " Active shell: sh (POSIX). Write POSIX shell commands: `ls`, `grep`, `find`, "

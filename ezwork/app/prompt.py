@@ -14,7 +14,7 @@ would be redundant.
 Layout (priority ascending — stable, low-churn sections first to maximise
 prefix-cache hits):
     identity      (0)   who the agent is
-    guidelines    (10)  working rules + grep/glob via bash hint
+    guidelines    (10)  working rules + bash search guidance
     environment   (20)  cwd / home / config path / sessions path / skills dirs
     subagents     (25)  how to spawn a sub-agent via `ezwork -p` from bash
     skills        (30)  skill discovery + read-based invocation
@@ -40,11 +40,16 @@ GUIDELINES = (
     "- After modifying a file, verify the change (re-read or run a check).\n"
     "- When a tool returns an error, read it and recover; do not give up.\n"
     "- Keep answers short; skip restating the user's request.\n"
-    "- Prefer the dedicated search tools over shell commands: `glob` for file "
-    "discovery (e.g. `**/*.py`) and `grep` for content search (regex, with "
-    "type/context/count modes) — they filter noise automatically and give "
-    "cleaner results. Bash `find`/`grep` are allowed only when you need shell "
-    "piping or other bash features (e.g. `grep -r x | wc -l`)."
+    "- Search with the bash tool — there are no dedicated search tools. "
+    "Content: `grep -rn 'pattern' .`; file discovery: `find . -name '*.py'`. "
+    "PROACTIVELY exclude noise directories (node_modules, .git, __pycache__, "
+    ".venv, dist, build, target, .next, ...): for grep add "
+    "`--exclude-dir={node_modules,.git,__pycache__,.venv,dist,build,target}`, "
+    "for find add `-not -path '*/node_modules/*'` (repeat per dir). Pipe when "
+    "you need counts/filtering: `grep -rn x | wc -l`. In PowerShell use "
+    "`Select-String`/`Get-ChildItem`; in cmd use `findstr`/`dir`.\n"
+    "- List a directory with `ls` (or `dir`/`Get-ChildItem`) before assuming "
+    "what files exist."
 )
 
 SUBAGENTS = (

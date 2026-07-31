@@ -41,7 +41,7 @@ from pathlib import Path
 
 from ezwork import __version__
 from ezwork.core import Agent, LoopConfig, ToolRegistry
-from ezwork.tools import BashTool, EditTool, GlobTool, GrepTool, ReadTool, WriteTool
+from ezwork.tools import BashTool, EditTool, ReadTool, WriteTool
 
 from .config import DEFAULT_CONFIG_PATH, Config
 from .prompt import build_system_prompt
@@ -78,7 +78,7 @@ def _skills_dirs(cwd: str) -> list[Path]:
 
 def _build_tools() -> ToolRegistry:
     reg = ToolRegistry()
-    for t in [ReadTool(), WriteTool(), EditTool(), BashTool(), GlobTool(), GrepTool()]:
+    for t in [ReadTool(), WriteTool(), EditTool(), BashTool()]:
         reg.register(t)
     return reg
 
