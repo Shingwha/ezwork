@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import signal
 import sys
 from collections.abc import Callable
@@ -40,6 +39,7 @@ from ezwork.tools import BashTool, EditTool, GlobTool, GrepTool, ReadTool, Write
 from .config import DEFAULT_CONFIG_PATH, Config
 from .prompt import build_system_prompt
 from .session import Session, SessionStore
+from .ui import Palette, UI
 
 # ─── paths ────────────────────────────────────────────────────────────────
 
@@ -60,112 +60,10 @@ def _skills_dirs(cwd: str) -> list[Path]:
 
 
 # ─── streaming renderer ────────────────────────────────────────────────────
-
-
-class StreamRenderer:
-    """Print streaming text + tool events as the loop runs (REPL only).
-
-    Only attached in interactive REPL mode. Oneshot does NOT use a renderer at
-    all — it just prints the final answer afterwards — so this class never needs
-    a "silent" mode and can't leak streaming output into oneshot stdout.
-
-    Layout per iteration:
-        [thinking]  dim, only when reasoning_delta arrives
-        answer      normal text
-        tools         -> name(args)
-                      ok result  /  x error
-    """
-
-    _DIM = "\033[2m"
-    _RESET = "\033[0m"
-
-    def __init__(self) -> None:
-        self._section: str | None = None  # "thinking" | "answer" | None
-        self._has_error = False
-        if not sys.stdout.isatty():
-            self._DIM = self._RESET = ""
-
-    def __call__(self, event) -> None:
-        handler = self._HANDLERS.get(event.type)
-        if handler:
-            handler(self, event)
-
-    # -- section state --
-
-    def _enter(self, section: str) -> None:
-        if self._section is not None and self._section != section:
-            self._close()
-        if self._section == section:
-            return
-        self._section = section
-        if section == "thinking":
-            print(f"{self._DIM}[thinking] ", end="", flush=True)
-
-    def _close(self) -> None:
-        if self._section == "thinking":
-            print(self._RESET, end="", flush=True)
-        if self._section is not None:
-            print(flush=True)
-        self._section = None
-
-    # -- handlers (one per event type) --
-
-    def _on_iter_start(self, event) -> None:
-        if event.iteration > 0:
-            self._close()
-            print("— next iteration —", flush=True)
-
-    def _on_stream_chunk(self, event) -> None:
-        chunk = event.chunk
-        if chunk.type == "text_delta" and chunk.text:
-            self._enter("answer")
-            print(chunk.text, end="", flush=True)
-        elif chunk.type == "reasoning_delta" and chunk.text:
-            self._enter("thinking")
-            print(chunk.text, end="", flush=True)
-
-    def _on_response(self, _event) -> None:
-        self._close()
-
-    def _on_tool_start(self, event) -> None:
-        self._close()
-        tc = event.tool_call.get("function", {})
-        args = _format_args(tc.get("arguments", ""))
-        print(f"  -> {tc.get('name', '?')}({args})", flush=True)
-
-    def _on_tool_complete(self, event) -> None:
-        content = event.tool_result.get("content", "")
-        tag = "x" if content.startswith("[error]") else "ok"
-        print(f"    {tag} {_oneline(content, 120)}", flush=True)
-
-    def _on_error(self, event) -> None:
-        # Errors go to stderr so they never pollute oneshot's stdout answer.
-        self._has_error = True
-        self._close()
-        print(f"[provider error] {event.error}", file=sys.stderr, flush=True)
-
-    _HANDLERS = {
-        "iter_start": _on_iter_start,
-        "stream_chunk": _on_stream_chunk,
-        "response": _on_response,
-        "tool_start": _on_tool_start,
-        "tool_complete": _on_tool_complete,
-        "error": _on_error,
-    }
-
-
-def _format_args(args_raw: str, limit: int = 80) -> str:
-    try:
-        d = json.loads(args_raw) if args_raw else {}
-    except Exception:
-        return args_raw[:limit]
-    s = ", ".join(f"{k}={v!r}" for k, v in d.items())
-    return s[:limit] + ("..." if len(s) > limit else "")
-
-
-def _oneline(text: str, limit: int) -> str:
-    s = " ".join(text.split())
-    return s[:limit] + ("..." if len(s) > limit else "")
+# The UI class lives in ui.py (Palette + streaming renderer). Attached only in
+# interactive REPL mode. Oneshot does NOT use a renderer at all — it just
+# prints the final answer afterwards — so there is no "silent" mode and
+# streaming output can never leak into oneshot stdout.
 
 
 # ─── agent construction ────────────────────────────────────────────────────
@@ -187,7 +85,7 @@ def build_agent(
 ) -> Agent:
     """Build a fully-wired AgentLoop.
 
-    render=True  -> attach StreamRenderer (REPL: live streaming + tool events)
+    render=True  -> attach UI (REPL: live streaming + tool events)
     render=False -> no renderer at all (oneshot: nothing prints during the run;
                     the caller prints the final answer afterwards). This avoids
                     the whole "silent flag" branch — oneshot simply has no
@@ -208,7 +106,7 @@ def build_agent(
         max_tokens=config.max_tokens,
     )
     if render:
-        cfg.emit.append(StreamRenderer())
+        cfg.emit.append(UI())
     if on_error is not None:
         cfg.emit.append(
             lambda e: on_error(e.error)
@@ -362,6 +260,7 @@ async def repl(
     store = SessionStore()
 
     session: Session | None = None
+    ui = UI()
     if session_id:
         loaded = store.load(_cwd(), session_id)
         if loaded is None:
@@ -369,16 +268,14 @@ async def repl(
             return 1
         session = loaded
         agent.messages = list(session.messages)
-        print(f"(resumed session {session.id}: {session.title or 'untitled'})")
+        ui.info(f"(resumed session {session.id}: {session.title or 'untitled'})")
 
-    print(
-        f"Ezwork CLI — model={config.model}  provider={config.provider}  "
-        f"(commands: /exit /clear /help /sessions /resume)"
-    )
+    model = config.model or config.provider
+    ui.info(f"Ezwork {__version__} — {model}  ·  /help for commands")
 
     while True:
         try:
-            line = input("\n> ").strip()
+            line = ui.prompt().strip()
         except (EOFError, KeyboardInterrupt):
             print()
             _persist_session(store, session, agent.messages)
@@ -395,7 +292,7 @@ async def repl(
         if cmd_lower == "/clear":
             agent.reset()
             session = None
-            print("(history cleared)")
+            ui.info("(history cleared)")
             continue
         if cmd_lower in ("/help", "?"):
             _print_help()
@@ -413,7 +310,9 @@ async def repl(
             if resumed is not None:
                 session = resumed
                 agent.messages = list(session.messages)
-                print(f"(resumed session {session.id}: {_format_preview(session.title)})")
+                ui.info(
+                    f"(resumed session {session.id}: {_format_preview(session.title)})"
+                )
             continue
 
         # Normal chat turn. Create the session lazily on first real message.
@@ -433,9 +332,9 @@ async def repl(
         try:
             await task
         except asyncio.CancelledError:
-            print("\n(interrupted)")
+            ui.info("(interrupted)")
         except Exception as e:
-            print(f"\n[error] {e}", file=sys.stderr)
+            ui.error(f"[error] {e}")
         finally:
             signal.signal(signal.SIGINT, original)
 
@@ -469,7 +368,11 @@ def _format_preview(title: str, limit: int = 40) -> str:
 
 def _format_session_line(s: Session) -> str:
     """One line for the /sessions and /resume listings."""
-    return f"  {s.id}  {_format_time(s.updated_at)}  {_format_preview(s.title)}"
+    return (
+        f"  {Palette.paint(s.id, 'accent')}  "
+        f"{Palette.paint(_format_time(s.updated_at), 'muted')}  "
+        f"{_format_preview(s.title)}"
+    )
 
 
 def _print_sessions(store: SessionStore, limit: int = 10) -> None:
@@ -510,6 +413,18 @@ def _resume_cmd(store: SessionStore, arg: str) -> Session | None:
 
 
 # ─── entry ─────────────────────────────────────────────────────────────────
+
+
+def _enable_ansi() -> None:
+    """Enable ANSI escape processing on Windows 10+ consoles (no-op elsewhere).
+
+    The well-known `os.system("")` trick switches the console into VT mode;
+    without it the styled UI shows raw escape codes on cmd/PowerShell.
+    """
+    if sys.platform == "win32":
+        import os
+
+        os.system("")
 
 
 def _read_stdin_if_piped() -> str | None:
@@ -554,6 +469,8 @@ def main() -> int:
         help="show version and exit.",
     )
     args = parser.parse_args()
+
+    _enable_ansi()
 
     if args.prompt is not None:
         stdin_text = _read_stdin_if_piped()
