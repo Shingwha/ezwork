@@ -18,6 +18,9 @@ To run a sub-agent, just start another one-shot session and keep its id:
     SID=$(ezwork -p "analyse the auth module" 2>&1 >/dev/null | grep '^session:' | cut -d' ' -f2)
     ezwork -p "now list its tests" -s "$SID"
 
+Piped stdin is appended as context, so a sub-agent can receive data without
+a file round-trip (e.g. `git diff | ezwork -p "summarize"`).
+
 A sub-agent is therefore simply a session you spin up from a parent workflow —
 same config, same tools, isolated history. No extra settings, no extra files.
 

@@ -41,6 +41,9 @@ $EDITOR ~/.ezwork/config.json         # fill in provider + api_key + model
 ezwork                                # interactive REPL
 ezwork -p "list the python files in this dir"        # one-shot, prints answer
 ezwork -p "continue the refactor" -s session_xxxxx   # continue a prior session
+cat file.txt | ezwork -p "summarize"                 # piped content = context
+git diff | ezwork -p "write a commit message"        # same, for diffs
+git diff | ezwork -p -                               # `-p -`: stdin is the whole prompt
 ```
 
 `~/.ezwork/config.json` (single provider):
@@ -80,6 +83,20 @@ ezwork -p "summarize this repo"        # stderr → session: session_xxxxx
 ezwork -p "now list its open todos" -s session_xxxxx
 ```
 
+**Piped stdin is appended as context** (the same convention as
+`cat file | claude -p "query"`), so you can hand the agent data without
+writing it to a file or stuffing it into the argument:
+
+```bash
+cat logs.txt | ezwork -p "explain the errors"
+git diff | ezwork -p "summarize this diff"
+curl -s https://example.com/api | ezwork -p "summarize the response"
+```
+
+Use `-p -` when the piped content *is* the whole prompt (read like `cat -`,
+interactively until Ctrl-D on a TTY); empty stdin exits with code 2 rather
+than sending an empty prompt.
+
 ### Sub-agents are just sessions
 
 There is no separate sub-agent subsystem. Every `-p` run is an isolated session;
@@ -90,6 +107,14 @@ isolated history:
 ```bash
 ezwork -p "analyse the auth module"    # stderr → session: session_xxxxx
 ezwork -p "now write tests for it" -s session_xxxxx
+```
+
+To hand the sub-agent data without a file round-trip, pipe it — piped stdin
+is appended as context:
+
+```bash
+cat src/auth/models.py | ezwork -p "list the public functions and their tests"
+git diff | ezwork -p "propose a commit message for this diff"
 ```
 
 **Prompting rules for sub-agents** — a sub-agent cannot see the parent
