@@ -3,6 +3,10 @@
     ezwork                                  REPL: streaming, multi-turn
     ezwork -p "your question"               oneshot: answer to stdout,
                                          session id + tokens to stderr
+    ezwork -p -                             oneshot, prompt read from stdin
+                                         (e.g. `git diff | ezwork -p -`)
+    cat file | ezwork -p "summarize"        oneshot; piped content is appended
+                                         as context (Claude Code convention)
     ezwork -p "continue..." -s <id>         oneshot, continue an existing session
     ezwork --model X                        override model for this run
     ezwork --no-session                     oneshot without persisting a session
@@ -13,6 +17,9 @@ To run a sub-agent, just start another one-shot session and keep its id:
 
     SID=$(ezwork -p "analyse the auth module" 2>&1 >/dev/null | grep '^session:' | cut -d' ' -f2)
     ezwork -p "now list its tests" -s "$SID"
+
+Piped stdin is appended as context, so a sub-agent can receive data without
+a file round-trip (e.g. `git diff | ezwork -p "summarize"`).
 
 A sub-agent is therefore simply a session you spin up from a parent workflow —
 same config, same tools, isolated history. No extra settings, no extra files.
@@ -406,6 +413,9 @@ def _resume_cmd(store: SessionStore, arg: str) -> Session | None:
 
 # ─── entry ─────────────────────────────────────────────────────────────────
 
+# How long `-p -` waits for piped stdin before giving up (see _read_stdin).
+_STDIN_TIMEOUT = 2.0
+
 
 def _enable_ansi() -> None:
     """Enable ANSI escape processing on Windows 10+ consoles (no-op elsewhere).
@@ -419,12 +429,71 @@ def _enable_ansi() -> None:
         os.system("")
 
 
+def _read_piped_stdin() -> str | None:
+    """Return piped/redirected stdin content, or None if there is none.
+
+    Used for two purposes: `-p -` (stdin is the whole prompt) and piped
+    context with `-p "query"` (stdin content is appended as context, matching
+    `cat file | claude -p "query"`).
+
+    Never blocks indefinitely: piped input is drained with a short timeout so
+    a never-closing pipe (sandbox, CI) cannot hang the process. Returns None
+    when stdin is a TTY, has no data, or select() can't probe it (Windows).
+    """
+    if sys.stdin.isatty():
+        return None
+
+    import os
+    import select
+    import time
+
+    try:
+        select.select([sys.stdin], [], [], 0)
+    except (OSError, ValueError):
+        return None  # Windows: select() only works on sockets
+
+    chunks: list[str] = []
+    deadline = time.monotonic() + _STDIN_TIMEOUT
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        ready, _, _ = select.select([sys.stdin], [], [], remaining)
+        if not ready:
+            break
+        data = os.read(sys.stdin.fileno(), 65536)
+        if not data:  # EOF — the pipe writer closed
+            break
+        chunks.append(data.decode("utf-8", errors="replace"))
+    return "".join(chunks) if chunks else None
+
+
+def _prompt_from_stdin() -> str:
+    """Read the whole prompt from stdin for `-p -` (like `cat -`).
+
+    On a TTY this reads interactively until EOF (Ctrl-D); piped input is
+    drained via _read_piped_stdin(). Raises SystemExit(2) on empty input so
+    we never send an empty prompt (or a literal '-') to the model.
+    """
+    if sys.stdin.isatty():
+        data = sys.stdin.read()
+    else:
+        data = _read_piped_stdin() or ""
+    if not data.strip():
+        print("error: -p - received no input on stdin", file=sys.stderr)
+        raise SystemExit(2)
+    return data
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="ezwork",
         description="Ezwork — a lean coding agent (REPL or one-shot).",
     )
-    parser.add_argument("-p", "--prompt", help="one-shot prompt; omit for REPL.")
+    parser.add_argument(
+        "-p", "--prompt",
+        help="one-shot prompt; use '-' to read it from stdin; omit for REPL.",
+    )
     parser.add_argument("-s", "--session", help="session id to resume/continue.")
     parser.add_argument("--model", help="override the model for this run.")
     parser.add_argument(
@@ -443,10 +512,23 @@ def main() -> int:
     _enable_ansi()
 
     if args.prompt is not None:
+        prompt = args.prompt
+        if prompt == "-":
+            # `-p -`: stdin is the whole prompt (like `cat -`).
+            try:
+                prompt = _prompt_from_stdin()
+            except SystemExit as exc:
+                return int(exc.code)
+        else:
+            # `-p "query"` with piped stdin: append the content as context,
+            # matching `cat file | claude -p "query"` (Claude Code convention).
+            piped = _read_piped_stdin()
+            if piped:
+                prompt = f"{prompt}\n\n{piped}"
         try:
             return asyncio.run(
                 oneshot(
-                    args.prompt,
+                    prompt,
                     session_id=args.session,
                     no_session=args.no_session,
                     model_override=args.model,
