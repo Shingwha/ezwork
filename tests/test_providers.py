@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from ezwork.core.provider import ThinkingPreset
+from ezwork.app.config import Config
 from ezwork.providers import (
     DeepSeek,
     DeepSeekPreset,
@@ -48,6 +49,40 @@ def test_factory_returns_openai_provider(factory):
 def test_factory_base_url(factory, expected_url):
     p = factory(api_key="sk-test")
     assert p._base_url == expected_url
+
+
+@pytest.mark.parametrize("factory", [LongCat, DeepSeek, GLM, Mimo, MiniMax])
+def test_factory_base_url_override(factory):
+    """Config base_url must override the vendor default.
+
+    Regression: the factories hardcoded base_url=BASE_URL while forwarding
+    **kwargs, so a non-empty base_url crashed with "got multiple values
+    for keyword argument 'base_url'" (seen when pointing DeepSeek at the
+    opencode.ai zen gateway).
+    """
+    p = factory(api_key="sk-test", base_url="https://opencode.ai/zen/go/v1")
+    assert p._base_url == "https://opencode.ai/zen/go/v1"
+
+
+def test_config_build_provider_passes_overrides():
+    """Config.build_provider() must forward base_url/model/extra_body.
+
+    Regression: the full config→factory path crashed on a non-empty
+    base_url (kwargs collision in the vendor factories).
+    """
+    cfg = Config.from_dict(
+        {
+            "provider": "deepseek",
+            "api_key": "sk-test",
+            "base_url": "https://opencode.ai/zen/go/v1/chat/completions",
+            "model": "deepseek-v4-flash",
+            "extra_body": {"custom_flag": True},
+        }
+    )
+    p = cfg.build_provider()
+    assert p._base_url == "https://opencode.ai/zen/go/v1/chat/completions"
+    assert p.model == "deepseek-v4-flash"
+    assert p._extra_body == {"custom_flag": True}
 
 
 @pytest.mark.parametrize(
