@@ -3,6 +3,8 @@
     ezwork                                  REPL: streaming, multi-turn
     ezwork -p "your question"               oneshot: answer to stdout,
                                          session id + tokens to stderr
+    ezwork -p -                             oneshot, prompt read from stdin
+                                         (e.g. `git diff | ezwork -p -`)
     ezwork -p "continue..." -s <id>         oneshot, continue an existing session
     ezwork --model X                        override model for this run
     ezwork --no-session                     oneshot without persisting a session
@@ -406,6 +408,9 @@ def _resume_cmd(store: SessionStore, arg: str) -> Session | None:
 
 # ─── entry ─────────────────────────────────────────────────────────────────
 
+# How long `-p -` waits for piped stdin before giving up (see _read_stdin).
+_STDIN_TIMEOUT = 2.0
+
 
 def _enable_ansi() -> None:
     """Enable ANSI escape processing on Windows 10+ consoles (no-op elsewhere).
@@ -419,12 +424,51 @@ def _enable_ansi() -> None:
         os.system("")
 
 
+def _read_stdin() -> str:
+    """Read prompt text from stdin for `-p -` (like `cat -`).
+
+    On a TTY this reads interactively until EOF (Ctrl-D). Piped input is
+    drained with a short timeout so a never-closing pipe (sandbox, CI) cannot
+    hang the process; platforms without select() on pipes (Windows) fall back
+    to a plain read-to-EOF.
+    """
+    if sys.stdin.isatty():
+        return sys.stdin.read()
+
+    import os
+    import select
+    import time
+
+    try:
+        select.select([sys.stdin], [], [], 0)
+    except (OSError, ValueError):
+        return sys.stdin.read()  # Windows: select() only works on sockets
+
+    chunks: list[str] = []
+    deadline = time.monotonic() + _STDIN_TIMEOUT
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        ready, _, _ = select.select([sys.stdin], [], [], remaining)
+        if not ready:
+            break
+        data = os.read(sys.stdin.fileno(), 65536)
+        if not data:  # EOF — the pipe writer closed
+            break
+        chunks.append(data.decode("utf-8", errors="replace"))
+    return "".join(chunks)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="ezwork",
         description="Ezwork — a lean coding agent (REPL or one-shot).",
     )
-    parser.add_argument("-p", "--prompt", help="one-shot prompt; omit for REPL.")
+    parser.add_argument(
+        "-p", "--prompt",
+        help="one-shot prompt; use '-' to read it from stdin; omit for REPL.",
+    )
     parser.add_argument("-s", "--session", help="session id to resume/continue.")
     parser.add_argument("--model", help="override the model for this run.")
     parser.add_argument(
@@ -443,10 +487,16 @@ def main() -> int:
     _enable_ansi()
 
     if args.prompt is not None:
+        prompt = args.prompt
+        if prompt == "-":
+            prompt = _read_stdin()
+            if not prompt.strip():
+                print("error: -p - received no input on stdin", file=sys.stderr)
+                return 2
         try:
             return asyncio.run(
                 oneshot(
-                    args.prompt,
+                    prompt,
                     session_id=args.session,
                     no_session=args.no_session,
                     model_override=args.model,
