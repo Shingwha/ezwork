@@ -308,7 +308,7 @@ class BashSession:
     def cwd(self) -> str:
         return self._cwd
 
-    def execute(self, command: str, timeout: int = 240) -> str:
+    def execute(self, command: str, timeout: int = 600) -> str:
         backend = self._ensure_backend()
 
         # 1. cd / env builtins are applied to session state in-process.
@@ -343,24 +343,27 @@ class BashSession:
 # ─── tool ──────────────────────────────────────────────────────────────────
 
 
-_BASH_PARAMS = {
-    "command": {
-        "type": "string",
-        "optional": True,
-        "description": "The command to execute, in the syntax of the active "
-        "shell described below. Omit when restart=true.",
-    },
-    "restart": {
-        "type": "boolean",
-        "optional": True,
-        "description": "Reset session state (working directory and environment variables)",
-    },
-    "timeout": {
-        "type": "number",
-        "optional": True,
-        "description": "Max execution time in seconds (default: 240)",
-    },
-}
+def _bash_params(default_timeout: int) -> dict:
+    """Tool params. The timeout description reflects the ACTUAL default so the
+    model never sees a stale hardcoded number."""
+    return {
+        "command": {
+            "type": "string",
+            "optional": True,
+            "description": "The command to execute, in the syntax of the active "
+            "shell described below. Omit when restart=true.",
+        },
+        "restart": {
+            "type": "boolean",
+            "optional": True,
+            "description": "Reset session state (working directory and environment variables)",
+        },
+        "timeout": {
+            "type": "number",
+            "optional": True,
+            "description": f"Max execution time in seconds (default: {default_timeout})",
+        },
+    }
 
 _BASE_DESC = (
     "Run a shell command in a persistent session. Working directory and "
@@ -414,7 +417,7 @@ class BashTool(Tool):
     description and runtime behaviour always agree.
     """
 
-    def __init__(self, timeout: int = 240) -> None:
+    def __init__(self, timeout: int = 600) -> None:
         # Detect up front so the description reflects the real shell. If nothing
         # is found, we still build the tool (neutral description); it raises a
         # clear error on first command rather than failing at import time.
@@ -425,7 +428,7 @@ class BashTool(Tool):
         super().__init__(
             name="bash",
             description=_build_desc(self._family),
-            params=_BASH_PARAMS,
+            params=_bash_params(timeout),
             func=self._execute,
         )
 

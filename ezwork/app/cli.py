@@ -76,9 +76,9 @@ def _skills_dirs(cwd: str) -> list[Path]:
 # ─── agent construction ────────────────────────────────────────────────────
 
 
-def _build_tools() -> ToolRegistry:
+def _build_tools(tool_timeout: int) -> ToolRegistry:
     reg = ToolRegistry()
-    for t in [ReadTool(), WriteTool(), EditTool(), BashTool()]:
+    for t in [ReadTool(), WriteTool(), EditTool(), BashTool(timeout=tool_timeout)]:
         reg.register(t)
     return reg
 
@@ -111,6 +111,7 @@ def build_agent(
         thinking=config.thinking,
         reasoning_effort=config.reasoning_effort or None,
         max_tokens=config.max_tokens,
+        tool_timeout=config.tool_timeout,
     )
     if render:
         cfg.emit.append(UI())
@@ -121,7 +122,7 @@ def build_agent(
             else None
         )
 
-    tools = _build_tools()
+    tools = _build_tools(config.tool_timeout)
     system_prompt = build_system_prompt(
         cwd=_cwd(),
         home=HOME,

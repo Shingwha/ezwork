@@ -49,7 +49,12 @@ class LoopConfig:
     # ---- limits ----
     max_tokens: int = 32768
     tool_result_limit: int = 25000
-    tool_timeout: int = 240
+    # Hard ceiling for EVERY tool call, applied by the loop around execution
+    # (asyncio.wait_for). Generous because a bash call may run a whole
+    # sub-agent session (ezwork -p) that streams for minutes. Tools with their
+    # own internal timeout (e.g. BashTool) should default to the same value —
+    # the app wires them from the same config knob.
+    tool_timeout: int = 600
     max_iterations: int = 0  # 0 = unlimited
 
     # ---- thinking control (passed through to provider.stream) ----

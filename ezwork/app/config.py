@@ -15,7 +15,8 @@ JSON shape:
       "model": "LongCat-2.0",
       "thinking": true,               # enable extended thinking
       "reasoning_effort": "",         # "" = vendor default; else e.g. "high"/"max"
-      "max_tokens": 32768
+      "max_tokens": 32768,
+      "tool_timeout": 600             # per-tool-call timeout (seconds)
     }
 """
 
@@ -54,6 +55,10 @@ class Config:
     thinking: bool = True
     reasoning_effort: str = ""
     max_tokens: int = 32768
+    # Per-tool-call timeout (seconds). Single source of truth for the agent
+    # loop's hard ceiling AND the bash tool's own default; the CLI wires both
+    # from here so they can never drift apart.
+    tool_timeout: int = 600
     extra_body: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -65,6 +70,7 @@ class Config:
             "thinking": self.thinking,
             "reasoning_effort": self.reasoning_effort,
             "max_tokens": self.max_tokens,
+            "tool_timeout": self.tool_timeout,
         }
         if self.extra_body:
             d["extra_body"] = self.extra_body
@@ -80,6 +86,7 @@ class Config:
             thinking=bool(data.get("thinking", True)),
             reasoning_effort=str(data.get("reasoning_effort", "") or ""),
             max_tokens=int(data.get("max_tokens", 32768)),
+            tool_timeout=int(data.get("tool_timeout", 600)),
             extra_body=dict(data.get("extra_body", {}) or {}),
         )
 
