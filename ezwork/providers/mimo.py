@@ -35,10 +35,11 @@ def Mimo(
     **kwargs: Any,
 ) -> OpenAIProvider:
     """Build a Mimo OpenAIProvider. Pass model= to override the default."""
+    base_url = kwargs.pop("base_url", None) or BASE_URL
     return OpenAIProvider(
         api_key=api_key,
         model=model or DEFAULT_MODEL,
-        base_url=BASE_URL,
+        base_url=base_url,
         thinking_preset=MimoPreset(),
         extra_body=extra_body,
         **kwargs,
