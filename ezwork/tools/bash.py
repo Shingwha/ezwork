@@ -171,14 +171,27 @@ class _PosixBackend(_ShellBackend):
     def handle_builtin(self, command, cwd, env_vars):
         stripped = command.strip()
         # Bare `cd <path>` (no chaining) — handle in-process so cwd persists.
-        if stripped.startswith("cd ") and "&&" not in stripped and ";" not in stripped and "|" not in stripped:
+        if (
+            stripped.startswith("cd ")
+            and "&" not in stripped
+            and ";" not in stripped
+            and "|" not in stripped
+        ):
             target = stripped[3:].strip()
             new_cwd = _resolve_cd(target, cwd)
             if new_cwd is None:
                 return (f"bash: cd: {target}: No such file or directory", cwd)
             return (new_cwd, new_cwd)
-        # `export VAR=value` — record into the session env.
-        if stripped.startswith("export ") and "=" in stripped:
+        # `export VAR=value` — record into the session env. Only the bare form:
+        # a chained command (`export X=1 && echo "$X"`) must run in the shell,
+        # otherwise the whole chain would be swallowed into the value.
+        if (
+            stripped.startswith("export ")
+            and "=" in stripped
+            and "&" not in stripped
+            and ";" not in stripped
+            and "|" not in stripped
+        ):
             expr = stripped[7:]
             key, value = expr.split("=", 1)
             env_vars[key.strip()] = value.strip().strip("\"'")
@@ -208,9 +221,15 @@ class _PowerShellBackend(_ShellBackend):
             if new_cwd is None:
                 return (f"Set-Location: Cannot find path '{target}'.", cwd)
             return (new_cwd, new_cwd)
-        # `$env:VAR=value` — record into the session env.
+        # `$env:VAR=value` — record into the session env (bare form only;
+        # `;`/`&&`/`|` chains must run in the shell).
         m = re.match(r"(?i)^\$env:(\w+)\s*=\s*(.+)$", stripped)
-        if m:
+        if (
+            m
+            and ";" not in stripped
+            and "&&" not in stripped
+            and "|" not in stripped
+        ):
             env_vars[m.group(1)] = m.group(2).strip().strip("'\"")
             return ("", cwd)
         return None
@@ -237,9 +256,10 @@ class _CmdBackend(_ShellBackend):
             if new_cwd is None:
                 return (f"The system cannot find the path specified: {target}", cwd)
             return (new_cwd, new_cwd)
-        # `set VAR=value` — record into the session env.
+        # `set VAR=value` — record into the session env (bare form only;
+        # cmd chains with `&`/`|` and must run in the shell).
         m = re.match(r"(?i)^set\s+(\w+)\s*=\s*(.*)$", stripped)
-        if m:
+        if m and "&" not in stripped and "|" not in stripped:
             env_vars[m.group(1)] = m.group(2).strip().strip("\"")
             return ("", cwd)
         return None

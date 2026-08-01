@@ -412,6 +412,34 @@ def test_backend_env_var_persists(backend, family):
     _backends_present(),
     ids=lambda v: v if isinstance(v, str) else v.family,
 )
+def test_backend_chained_env_set_runs_in_shell(backend, family):
+    """A chained env-set (`export X=1 && echo "$X"`) must run as a shell
+    command — the builtin interception must not swallow the chain into the
+    env value (regression: compound commands starting with export/$env:/set
+    returned '(empty)' and polluted the session env)."""
+    from ezwork.tools.bash import BashSession
+
+    sess = BashSession()
+    sess._backend = backend
+    if family == "powershell":
+        out = sess.execute('$env:CHVAR=hello; Write-Output $env:CHVAR')
+        assert "hello" in out
+    elif family == "cmd":
+        # cmd expands %CHVAR% at parse time, so the echo shows the literal —
+        # what matters is that the chain ran as a command, not as a builtin.
+        sess.execute("set CHVAR=hello & echo %CHVAR%")
+    else:
+        out = sess.execute('export CHVAR=hello && echo "$CHVAR"')
+        assert "hello" in out
+    # the chain must NOT be recorded as a session env var
+    assert "CHVAR" not in sess._env_vars
+
+
+@pytest.mark.parametrize(
+    "backend,family",
+    _backends_present(),
+    ids=lambda v: v if isinstance(v, str) else v.family,
+)
 def test_backend_unknown_command_returns_output(backend, family):
     """An unknown command produces a non-empty result (error text from the
     shell), never an exception."""
