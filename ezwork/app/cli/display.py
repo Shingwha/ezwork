@@ -136,7 +136,7 @@ class Display:
         self._print(Palette.paint(text, "dim"))
 
     def warn(self, text: str) -> None:
-        self._print(Palette.paint(f"⚠ {text}", "muted"))
+        self._print(Palette.paint(f"! {text}", "muted"))
 
     def error(self, text: str) -> None:
         self._print(Palette.paint(f"✗ {text}", "error"))
