@@ -128,3 +128,28 @@ def test_discover_skills_skips_dirs_without_skill_md(tmp_path):
     (tmp_path / "skills" / "nope").mkdir()
     assert _discover_skills([tmp_path / "skills"]) == []
 
+
+def test_build_system_prompt_assembles_dynamic_sections(tmp_path):
+    """Smoke test for the assembly wiring: cwd, skills and AGENTS.md are
+    injected into the output. Deliberately NOT wording-coupled — the prompt
+    text itself is iterated freely without breaking tests."""
+    from ezwork.app.prompt import build_system_prompt
+
+    skills_dir = tmp_path / ".ezwork" / "skills"
+    (skills_dir / "demo").mkdir(parents=True)
+    (skills_dir / "demo" / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: test skill\n---\nbody\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "AGENTS.md").write_text("## project rule\nuse tabs\n", encoding="utf-8")
+
+    prompt = build_system_prompt(
+        cwd=str(tmp_path),
+        home=str(tmp_path),
+        config_path=str(tmp_path / "config.json"),
+        sessions_dir=str(tmp_path / "sessions"),
+        skills_dirs=[skills_dir],
+    )
+    assert str(tmp_path) in prompt                       # environment section
+    assert 'name="demo"' in prompt                       # skills block injected
+    assert "## project rule" in prompt                   # AGENTS.md injected

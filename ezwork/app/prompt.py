@@ -14,7 +14,8 @@ would be redundant.
 Layout (priority ascending — stable, low-churn sections first to maximise
 prefix-cache hits):
     identity      (0)   who the agent is
-    guidelines    (10)  working rules + bash search guidance
+    guidelines    (10)  working rules
+    shell         (12)  efficient shell usage (search, pipes, parallelism)
     environment   (20)  cwd / home / config path / sessions path / skills dirs
     subagents     (25)  how to spawn a sub-agent via `ezwork -p` from bash
     skills        (30)  skill discovery + read-based invocation
@@ -44,6 +45,30 @@ GUIDELINES = (
     "`grep -rn --exclude-dir={node_modules,.git,__pycache__,.venv,dist,build,target} 'pat' .`, "
     "files with `find . -name '*.py'`. List a directory with `ls` before "
     "assuming what exists."
+)
+
+SHELL = (
+    "Efficient shell usage:\n"
+    "- Batch independent tool calls into ONE message: tool calls in a single "
+    "response run in parallel, so 3-5 independent commands complete in one "
+    "round-trip — never run them one at a time.\n"
+    "- Make one call answer a whole question: chain with pipes "
+    "(`grep -rln 'TODO' src | head`), `&&`/`;` (`ls src && wc -l src/*.py`), "
+    "or compound commands instead of one call per item.\n"
+    "- Inspect many files in one command instead of reading them one by one: "
+    "`grep -rn -A2 -B2 'pattern' src/`, `head -100 a.py b.py c.py`, "
+    "`find src -name '*.py' -exec wc -l {} +`.\n"
+    "- Use loops and xargs for repetitive work: "
+    "`for f in src/*.py; do wc -l \"$f\"; done`, "
+    "`find tests -name '*.py' | xargs grep -l skip`.\n"
+    "- Trim outputs you only need a preview of (`head`, `-l`, `wc -l`) so "
+    "tool results stay small.\n"
+    "- Run long independent commands inside one call with `&` and `wait` "
+    "when their outputs don't interleave.\n"
+    "- Parallel bash calls share one session: parallelize read-only "
+    "commands freely; keep `cd`/`export` sequences sequential. Bare `cd` "
+    "and `export` persist across calls; `cd x && cmd` changes the "
+    "directory only for that call."
 )
 
 SUBAGENTS = (
@@ -250,6 +275,7 @@ def build_system_prompt(
     sections = [
         Section("identity", IDENTITY, priority=0),
         Section("guidelines", GUIDELINES, priority=10),
+        Section("shell", SHELL, priority=12),
         Section("environment", environment, priority=20),
         Section("subagents", SUBAGENTS, priority=25),
         Section("skills", _render_skills_block(skills_dirs), priority=30),

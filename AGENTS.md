@@ -168,7 +168,7 @@ One minimal, opinionated way to run the kernel — and the `ezwork` command:
 
 - **config.py** — single-provider config at `~/.ezwork/config.json` (provider, api_key, base_url, model, thinking, reasoning_effort, max_tokens). First run writes a template and exits gracefully if not yet filled in.
 - **session.py** — `Session` (data) + `SessionStore` (JSON files under `~/.ezwork/sessions/<sha256(cwd)[:16]>/`).
-- **prompt.py** — `build_system_prompt()` composes identity / guidelines (incl. bash search guidance) / environment / subagents / skills / agents.
+- **prompt.py** — `build_system_prompt()` composes identity / guidelines / shell (efficient bash usage: search, pipes, parallel tool calls) / environment / subagents / skills / agents.
 - **cli.py** — entry point: REPL + oneshot. `ezwork -p "..."` writes the answer to stdout and `session: <id>` to stderr; `ezwork -p "..." -s <id>` continues any session. Sub-agents are just sessions — no separate subsystem.
 
 Provider errors never crash the process: the kernel emits `ErrorEvent`, the CLI's renderer prints it, and the loop keeps going.

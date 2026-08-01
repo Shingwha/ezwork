@@ -368,7 +368,9 @@ def _bash_params(default_timeout: int) -> dict:
 _BASE_DESC = (
     "Run a shell command in a persistent session. Working directory and "
     "environment variables persist across commands. Use restart=true (with no "
-    "command) to reset session state."
+    "command) to reset session state. Prefer one compound command (pipes, "
+    "&&, loops, xargs) over several calls; independent tool calls in the "
+    "same message run in parallel."
 )
 
 # Per-family guidance appended to the tool description so the model writes
@@ -379,7 +381,9 @@ _SHELL_HINTS: dict[str, str] = {
         " Active shell: bash (POSIX). Write Unix-style commands: `ls`, "
         "`grep -rn 'pattern' --exclude-dir={node_modules,.git,__pycache__}`, "
         "`find . -name '*.py'`, `cat`, pipes `|`, and-chains `&&`, "
-        "`export VAR=val`. Bare `cd` and `export` persist across calls."
+        "`export VAR=val`. Bare `cd` and `export` persist across calls; a "
+        "chained form (`cd x && cmd`, `export X=1 && echo \"$X\"`) runs in the "
+        "shell and applies only to that call."
     ),
     "sh": (
         " Active shell: sh (POSIX). Write POSIX shell commands: `ls`, `grep`, `find`, "
