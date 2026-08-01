@@ -6,6 +6,7 @@ virtual filesystem). All tools operate directly on the local filesystem.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from ezwork.core import Tool, ToolError
@@ -46,7 +47,10 @@ def _format_lines(content: str, label: str, offset: int, limit: int) -> str:
 
 def _list_directory(p: Path) -> str:
     """List directory contents when read() is called on a directory."""
-    entries = sorted(p.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
+    with os.scandir(p) as it:
+        # DirEntry caches is_dir()/stat() after the first call, so sorting
+        # and listing here costs one syscall per entry instead of O(n log n).
+        entries = sorted(it, key=lambda e: (not e.is_dir(), e.name.lower()))
     dirs: list[str] = []
     files: list[str] = []
     for entry in entries:

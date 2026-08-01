@@ -36,6 +36,7 @@ import argparse
 import asyncio
 import signal
 import sys
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -105,6 +106,11 @@ def build_agent(
     provider = config.build_provider()
     if model_override:
         provider.model = model_override  # temporary run override
+    # Warm the LLM client in a background thread so the first stream() call
+    # doesn't pay the ~2-3s SDK import + client construction inline. Optional
+    # hook — custom providers that don't implement it stay cold-lazy.
+    if hasattr(provider, "warmup"):
+        provider.warmup()
 
     cfg = LoopConfig(
         max_retries=2,
@@ -206,11 +212,11 @@ async def oneshot(
         answer = await agent.chat(prompt_text)
     except asyncio.CancelledError:
         print("\n(interrupted)", file=sys.stderr)
-        _persist_session(store, session, agent.messages, no_session=no_session)
+        await _persist_session(store, session, agent.messages, no_session=no_session)
         return 130
     except Exception as e:
         print(f"[error] {e}", file=sys.stderr)
-        _persist_session(store, session, agent.messages, no_session=no_session)
+        await _persist_session(store, session, agent.messages, no_session=no_session)
         return 1
 
     # Output layout (human view in a terminal):
@@ -226,13 +232,13 @@ async def oneshot(
         # renderer is attached in oneshot mode, so surface the error here and
         # exit non-zero — a script must not mistake this for a real answer.
         print(f"[provider error] {errors[0]}", file=sys.stderr)
-        _persist_session(store, session, agent.messages, no_session=no_session)
+        await _persist_session(store, session, agent.messages, no_session=no_session)
         return 1
     print(answer, flush=True)
     u = agent.total_usage
     meta_lines = [f"[tokens: prompt={u.prompt_tokens} completion={u.completion_tokens}]"]
     if not no_session:
-        _persist_session(store, session, agent.messages)
+        await _persist_session(store, session, agent.messages)
         meta_lines.append(f"session: {session.id}")
     print("────────────────", file=sys.stderr)
     for line in meta_lines:
@@ -240,19 +246,23 @@ async def oneshot(
     return 0
 
 
-def _persist_session(
+async def _persist_session(
     store: SessionStore,
     session: Session | None,
     messages,
     *,
     no_session: bool = False,
 ) -> None:
-    """Save the session if there is one and anything to save. Never raises."""
+    """Save the session if there is one and anything to save. Never raises.
+
+    The write runs in a worker thread: a long history (large tool outputs)
+    can be megabytes of JSON, and saving synchronously would stall the loop
+    before the next prompt."""
     if no_session or session is None or not messages:
         return
     session.messages = list(messages)
     try:
-        store.save(session)
+        await asyncio.to_thread(store.save, session)
     except Exception:
         pass
 
@@ -286,7 +296,7 @@ async def repl(
             line = ui.prompt().strip()
         except (EOFError, KeyboardInterrupt):
             print()
-            _persist_session(store, session, agent.messages)
+            await _persist_session(store, session, agent.messages)
             return 0
         if not line:
             continue
@@ -295,7 +305,7 @@ async def repl(
         cmd_lower = cmd.lower()
 
         if cmd_lower in ("/exit", "/quit"):
-            _persist_session(store, session, agent.messages)
+            await _persist_session(store, session, agent.messages)
             return 0
         if cmd_lower == "/clear":
             agent.reset()
@@ -346,7 +356,7 @@ async def repl(
         finally:
             signal.signal(signal.SIGINT, original)
 
-        _persist_session(store, session, agent.messages)
+        await _persist_session(store, session, agent.messages)
         ui.divider()  # separator before the next prompt
 
 
@@ -416,30 +426,55 @@ def _resume_cmd(store: SessionStore, arg: str) -> Session | None:
 
 # How long `-p -` waits for piped stdin before giving up (see _read_stdin).
 _STDIN_TIMEOUT = 2.0
+# How long piped-context mode waits for the FIRST byte (see _read_stdin).
+# Kept short so a silent inherited pipe (CI, sub-agents) returns quickly;
+# once data flows, the _STDIN_TIMEOUT window applies.
+_STDIN_GRACE = 0.15
+
+
+def _preload_openai() -> None:
+    """Start the openai SDK import in a daemon thread (no client built).
+
+    The heavy import (~2s) then overlaps with arg parsing, the stdin drain,
+    and the REPL startup instead of sitting in the first stream() call.
+    """
+    def _work() -> None:
+        from ezwork.providers.openai import preload
+
+        preload()
+
+    threading.Thread(target=_work, daemon=True, name="ezwork-openai-preload").start()
 
 
 def _enable_ansi() -> None:
     """Enable ANSI escape processing on Windows 10+ consoles (no-op elsewhere).
 
     The well-known `os.system("")` trick switches the console into VT mode;
-    without it the styled UI shows raw escape codes on cmd/PowerShell.
+    without it the styled UI shows raw escape codes on cmd/PowerShell. Only
+    needed when stdout is an interactive terminal — oneshot/piped output
+    never emits ANSI, so skip the cmd.exe spawn there.
     """
-    if sys.platform == "win32":
+    if sys.platform == "win32" and sys.stdout.isatty():
         import os
 
         os.system("")
 
 
-def _read_piped_stdin() -> str | None:
+def _read_piped_stdin(first_byte_timeout: float = _STDIN_GRACE) -> str | None:
     """Return piped/redirected stdin content, or None if there is none.
 
     Used for two purposes: `-p -` (stdin is the whole prompt) and piped
     context with `-p "query"` (stdin content is appended as context, matching
     `cat file | claude -p "query"`).
 
-    Never blocks indefinitely: piped input is drained with a short timeout so
-    a never-closing pipe (sandbox, CI) cannot hang the process. Returns None
-    when stdin is a TTY, has no data, or select() can't probe it (Windows).
+    Never blocks indefinitely: waits up to `first_byte_timeout` for the first
+    byte (so `cat file | ezwork -p ...` still works), then drains with the
+    _STDIN_TIMEOUT window, so a never-closing pipe (sandbox, CI) cannot hang
+    the process. Context mode uses the short _STDIN_GRACE so a silent
+    inherited pipe (CI, sub-agents) returns after ~150ms instead of 2s; `-p -`
+    passes _STDIN_TIMEOUT since the whole prompt is expected on stdin.
+    Returns None when stdin is a TTY, has no data, or select() can't probe it
+    (Windows).
     """
     if sys.stdin.isatty():
         return None
@@ -449,7 +484,6 @@ def _read_piped_stdin() -> str | None:
 
     fd = sys.stdin.fileno()
     chunks: list[str] = []
-    deadline = time.monotonic() + _STDIN_TIMEOUT
 
     # select() only works on sockets on Windows; probe it and fall back to a
     # non-blocking drain loop there (os.set_blocking supports pipes on win32).
@@ -462,6 +496,11 @@ def _read_piped_stdin() -> str | None:
         use_select = False
 
     if use_select:
+        # Grace period for the first byte; then drain with the full window.
+        ready, _, _ = select.select([sys.stdin], [], [], first_byte_timeout)
+        if not ready:
+            return None
+        deadline = time.monotonic() + _STDIN_TIMEOUT
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -474,22 +513,28 @@ def _read_piped_stdin() -> str | None:
                 break
             chunks.append(data.decode("utf-8", errors="replace"))
     else:
-        try:
-            os.set_blocking(fd, False)
-        except OSError:
-            return None  # cannot probe this stdin (e.g. a console handle)
-        try:
+        def drain(deadline: float) -> bool:
+            """Read available data until deadline/EOF; True if any was read."""
             while True:
                 if time.monotonic() >= deadline:
-                    break
+                    return bool(chunks)
                 try:
                     data = os.read(fd, 65536)
                 except BlockingIOError:
                     time.sleep(0.01)
                     continue
                 if not data:  # EOF — the pipe writer closed
-                    break
+                    return bool(chunks)
                 chunks.append(data.decode("utf-8", errors="replace"))
+
+        try:
+            os.set_blocking(fd, False)
+        except OSError:
+            return None  # cannot probe this stdin (e.g. a console handle)
+        try:
+            if not drain(time.monotonic() + first_byte_timeout):
+                return None
+            drain(time.monotonic() + _STDIN_TIMEOUT)
         finally:
             os.set_blocking(fd, True)
 
@@ -506,7 +551,9 @@ def _prompt_from_stdin() -> str:
     if sys.stdin.isatty():
         data = sys.stdin.read()
     else:
-        data = _read_piped_stdin() or ""
+        # The whole prompt is expected here — allow the full drain window for
+        # the first byte, unlike piped-context mode.
+        data = _read_piped_stdin(first_byte_timeout=_STDIN_TIMEOUT) or ""
     if not data.strip():
         print("error: -p - received no input on stdin", file=sys.stderr)
         raise SystemExit(2)
@@ -514,6 +561,11 @@ def _prompt_from_stdin() -> str:
 
 
 def main() -> int:
+    # Kick off the openai SDK import in a background thread so it overlaps
+    # with arg parsing, the stdin drain (oneshot) and startup (REPL) instead
+    # of sitting in the first stream() call.
+    _preload_openai()
+
     parser = argparse.ArgumentParser(
         prog="ezwork",
         description="Ezwork — a lean coding agent (REPL or one-shot).",

@@ -106,6 +106,11 @@ class _ToolLine:
 class UI:
     """Streaming turn renderer. Attach to LoopConfig.emit (REPL only)."""
 
+    # Streamed chunks are batched to this interval before flushing — one
+    # syscall per token is measurable on slow terminals, while <50ms of
+    # buffering is imperceptible. Event boundaries always flush.
+    _FLUSH_INTERVAL = 0.05
+
     def __init__(self) -> None:
         self._tty = sys.stdout.isatty()
         Palette.enabled = self._tty
@@ -115,6 +120,7 @@ class UI:
         self._at_line_start = True       # is stdout at the start of a fresh line?
         self._pending_tool: _ToolLine | None = None
         self._usage = None
+        self._last_flush = time.monotonic()
 
     # ── public helpers for the REPL (non-streaming) ──
 
@@ -140,8 +146,10 @@ class UI:
 
     # ── output primitives ──
 
-    def _print(self, text: str = "", *, end: str = "\n") -> None:
-        print(text, end=end, flush=True)
+    def _print(self, text: str = "", *, end: str = "\n", flush: bool = True) -> None:
+        print(text, end=end, flush=flush)
+        if flush:
+            self._last_flush = time.monotonic()
         self._at_line_start = end == "\n" or text.endswith("\n")
 
     @staticmethod
@@ -176,9 +184,11 @@ class UI:
 
     def _on_stream_chunk(self, event) -> None:
         chunk = event.chunk
+        # Debounced flush for text deltas — see _FLUSH_INTERVAL.
+        flush = time.monotonic() - self._last_flush >= self._FLUSH_INTERVAL
         if chunk.type == "text_delta" and chunk.text:
             self._enter("answer")
-            self._print(chunk.text, end="")
+            self._print(chunk.text, end="", flush=flush)
         elif chunk.type == "reasoning_delta" and chunk.text:
             self._enter("thinking")
             self._thinking(chunk.text)

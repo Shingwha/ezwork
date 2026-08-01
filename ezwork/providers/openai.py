@@ -24,6 +24,8 @@ the app layer decides how to present them (it never crashes the process).
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from typing import Any, AsyncIterator
 
 from ezwork.core import StreamChunk, ThinkingPreset, ThinkingParams, Usage
@@ -47,6 +49,7 @@ class OpenAIProvider:
         self._api_key = api_key
         self._base_url = base_url
         self._client: Any = None  # lazy
+        self._client_lock = threading.Lock()
         self._model = model
         self._extra_body = dict(extra_body) if extra_body else {}
         self._thinking_preset = thinking_preset
@@ -54,14 +57,37 @@ class OpenAIProvider:
 
     def _ensure_client(self):
         if self._client is None:
-            from openai import AsyncOpenAI
+            # Double-checked locking: warmup() may construct the client from a
+            # background thread while stream() runs on the event loop.
+            with self._client_lock:
+                if self._client is None:
+                    from openai import AsyncOpenAI
 
-            self._client = AsyncOpenAI(
-                api_key=self._api_key,
-                base_url=self._base_url,
-                max_retries=self._max_retries,
-            )
+                    self._client = AsyncOpenAI(
+                        api_key=self._api_key,
+                        base_url=self._base_url,
+                        max_retries=self._max_retries,
+                    )
         return self._client
+
+    def warmup(self) -> None:
+        """Eagerly import the SDK and build the client in a daemon thread.
+
+        The first stream() call otherwise pays the full SDK import + client
+        construction (~2-3s with the openai package) inline. The app layer
+        calls this at startup so that cost overlaps with user typing / stdin
+        drain. No-op once the client exists; safe to call from any thread.
+        """
+        if self._client is None:
+            threading.Thread(
+                target=self._warmup_work, daemon=True, name="ezwork-openai-warmup"
+            ).start()
+
+    def _warmup_work(self) -> None:
+        self._ensure_client()
+        # Preload the retriable exception classes too, so the error path never
+        # does a second lazy import.
+        self._load_exc_classes()
 
     @property
     def model(self) -> str:
@@ -193,7 +219,10 @@ class OpenAIProvider:
             thinking=thinking, reasoning_effort=reasoning_effort,
         )
         try:
-            stream = await self._ensure_client().chat.completions.create(
+            # Build the client in a worker thread: even if warmup() hasn't
+            # finished yet, the SDK import must not block the event loop.
+            client = await asyncio.to_thread(self._ensure_client)
+            stream = await client.chat.completions.create(
                 **kwargs, extra_body=extra_body or None
             )
             async for chunk in stream:
@@ -279,6 +308,20 @@ def _extract_usage(usage: Any) -> Usage:
         prompt_cache_hit_tokens=hit,
         prompt_cache_miss_tokens=miss,
     )
+
+
+def preload() -> None:
+    """Import the openai package in the current thread (no client built).
+
+    The CLI starts this in a background thread at process start so the heavy
+    SDK import (~2s) overlaps with arg parsing, stdin drain, and the REPL
+    prompt. Idempotent; import failures are swallowed here — stream() will
+    surface the real error if the package is missing.
+    """
+    try:
+        from openai import AsyncOpenAI  # noqa: F401
+    except Exception:
+        pass
 
 
 def _deep_merge(target: dict[str, Any], src: dict[str, Any]) -> None:

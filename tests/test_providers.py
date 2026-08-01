@@ -183,3 +183,68 @@ def test_factory_extra_body_merged():
 )
 def test_preset_satisfies_protocol(preset_cls):
     assert isinstance(preset_cls(), ThinkingPreset)
+
+
+# ---- client warmup / preload ---------------------------------------------
+
+
+def test_warmup_builds_client_in_background_thread(monkeypatch):
+    """warmup() constructs the client (and preloads error classes) in a
+    daemon thread, so the first stream() call doesn't pay the ~2-3s SDK
+    import + construction inline."""
+    import threading
+    import time as _time
+
+    p = OpenAIProvider(api_key="sk-test")
+    calls: dict = {}
+
+    def fake_ensure():
+        calls["n"] = calls.get("n", 0) + 1
+        calls["thread"] = threading.current_thread().name
+
+    monkeypatch.setattr(p, "_ensure_client", fake_ensure)
+    monkeypatch.setattr(
+        OpenAIProvider, "_load_exc_classes", classmethod(lambda cls: None)
+    )
+    p.warmup()
+    deadline = _time.monotonic() + 2
+    while not calls.get("n") and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert calls.get("n") == 1
+    assert calls.get("thread") != threading.main_thread().name
+
+
+def test_warmup_is_noop_after_client_exists(monkeypatch):
+    """Calling warmup() twice must not spawn a second thread/client."""
+    import threading
+    import time as _time
+
+    p = OpenAIProvider(api_key="sk-test")
+    calls = {"n": 0}
+
+    def fake_ensure():
+        calls["n"] += 1
+        p._client = object()  # warmup()'s no-op guard checks this
+
+    monkeypatch.setattr(p, "_ensure_client", fake_ensure)
+    monkeypatch.setattr(
+        OpenAIProvider, "_load_exc_classes", classmethod(lambda cls: None)
+    )
+    p.warmup()
+    deadline = _time.monotonic() + 2
+    while not calls["n"] and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    p.warmup()  # client is now set — must not spawn again
+    _time.sleep(0.05)
+    assert calls["n"] == 1
+
+
+def test_preload_imports_openai():
+    """preload() pulls the SDK into sys.modules without building a client."""
+    import sys
+
+    from ezwork.providers.openai import preload
+
+    sys.modules.pop("openai", None)  # force a real (re)import
+    preload()
+    assert "openai" in sys.modules

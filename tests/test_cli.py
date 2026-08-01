@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 
 from ezwork.app import cli
 
@@ -73,6 +74,27 @@ def test_piped_stdin_tty_returns_none(monkeypatch) -> None:
     assert cli._read_piped_stdin() is None
 
 
+def test_piped_stdin_silent_open_pipe_returns_quickly(monkeypatch) -> None:
+    """A silent inherited pipe (CI, sub-agents) must not wait out the full
+    2s drain window — the first-byte grace period is all it costs."""
+    r, w = os.pipe()  # nothing written, writer kept open
+    monkeypatch.setattr(cli.sys, "stdin", _FakeStdin(fd=r, is_tty=False))
+    start = time.monotonic()
+    assert cli._read_piped_stdin(first_byte_timeout=0.05) is None
+    assert time.monotonic() - start < 1.0
+
+
+def test_read_piped_stdin_honours_first_byte_timeout(monkeypatch) -> None:
+    """The first-byte window is configurable: piped-context mode passes the
+    short grace, `-p -` passes the full _STDIN_TIMEOUT."""
+    r, w = os.pipe()
+    monkeypatch.setattr(cli.sys, "stdin", _FakeStdin(fd=r, is_tty=False))
+    monkeypatch.setattr(cli, "_STDIN_TIMEOUT", 0.4)
+    start = time.monotonic()
+    assert cli._read_piped_stdin(first_byte_timeout=cli._STDIN_TIMEOUT) is None
+    assert time.monotonic() - start >= 0.3  # waited the full window, not the grace
+
+
 # ─── _prompt_from_stdin (`-p -`) ──────────────────────────────────────────
 
 
@@ -95,6 +117,64 @@ def test_prompt_from_stdin_empty_exits_2(monkeypatch) -> None:
         assert exc.code == 2
     else:
         raise AssertionError("expected SystemExit(2)")
+
+
+def test_prompt_from_stdin_silent_pipe_still_errors(monkeypatch) -> None:
+    """`-p -` with a silent (open, empty) pipe still exits 2 — the whole
+    prompt is expected on stdin, so the full first-byte window applies
+    (unlike piped-context mode, which uses the short grace)."""
+    r, w = os.pipe()
+    monkeypatch.setattr(cli.sys, "stdin", _FakeStdin(fd=r, is_tty=False))
+    monkeypatch.setattr(cli, "_STDIN_TIMEOUT", 0.05)
+    try:
+        cli._prompt_from_stdin()
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("expected SystemExit(2)")
+
+
+# ─── _enable_ansi / build_agent ───────────────────────────────────────────
+
+
+def test_enable_ansi_only_spawns_on_tty(monkeypatch) -> None:
+    """The `os.system("")` cmd.exe spawn must only run when stdout is a TTY —
+    piped/oneshot output never emits ANSI and shouldn't pay for it."""
+    import os as _os
+
+    calls = {"n": 0}
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(
+        _os, "system", lambda _cmd: calls.__setitem__("n", calls["n"] + 1)
+    )
+    cli._enable_ansi()
+    assert calls["n"] == 1
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: False)
+    cli._enable_ansi()
+    assert calls["n"] == 1  # no spawn for non-TTY stdout
+
+
+def test_build_agent_warms_up_provider(monkeypatch) -> None:
+    """build_agent() starts provider.warmup() so the SDK import overlaps
+    startup instead of sitting in the first stream() call."""
+    from ezwork.app.config import Config
+    from ezwork.core import ToolRegistry
+
+    calls = {"n": 0}
+
+    class FakeProvider:
+        model = "m"
+
+        def warmup(self):
+            calls["n"] += 1
+
+    monkeypatch.setattr(Config, "build_provider", lambda self: FakeProvider())
+    monkeypatch.setattr(cli, "build_system_prompt", lambda **kw: "system")
+    monkeypatch.setattr(cli, "_build_tools", lambda timeout: ToolRegistry())
+    agent = cli.build_agent(Config(), render=False)
+    assert calls["n"] == 1
+    assert agent is not None
 
 
 # ─── main() dispatch ──────────────────────────────────────────────────────

@@ -411,26 +411,41 @@ def _build_desc(family: str | None) -> str:
 class BashTool(Tool):
     """Run shell commands in a persistent session (cross-platform).
 
-    The active shell is detected once at construction and baked into the tool's
-    description, so the model knows which command syntax to use (POSIX vs
-    PowerShell vs cmd). The same detected shell backs the session, so the
-    description and runtime behaviour always agree.
+    The active shell is detected once, lazily, on first use (schema
+    generation) and baked into the tool's description, so the model knows
+    which command syntax to use (POSIX vs PowerShell vs cmd). The session
+    detects the same shell on first execute, so the description and runtime
+    behaviour always agree. If nothing is found, the tool still builds with a
+    neutral description and raises a clear error on first command.
     """
 
     def __init__(self, timeout: int = 600) -> None:
-        # Detect up front so the description reflects the real shell. If nothing
-        # is found, we still build the tool (neutral description); it raises a
-        # clear error on first command rather than failing at import time.
-        shell = detect_shell()
-        self._session = BashSession(shell=shell)
+        self._shell: ShellInfo | None = None  # not yet detected
+        self._detected = False
+        self._session = BashSession()
         self._default_timeout = timeout
-        self._family = shell.family if shell else None
         super().__init__(
             name="bash",
-            description=_build_desc(self._family),
+            description=_build_desc(None),
             params=_bash_params(timeout),
             func=self._execute,
         )
+
+    def _detect(self) -> ShellInfo | None:
+        """Detect the active shell once and refresh the description to match."""
+        if not self._detected:
+            self._detected = True
+            self._shell = detect_shell()
+            self.description = _build_desc(
+                self._shell.family if self._shell else None
+            )
+        return self._shell
+
+    def to_schema(self) -> dict:
+        # Resolve the shell so the description tells the model the right
+        # syntax. Runs at most once — ToolRegistry caches the schema.
+        self._detect()
+        return super().to_schema()
 
     def _execute(self, args: dict) -> str:
         if args.get("restart"):

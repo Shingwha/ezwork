@@ -154,7 +154,7 @@ There is intentionally **no EventBus class** — fan-out is `for cb in emit: cb(
 
 `Tool(name, description, params, func)`. `params` is a simplified dict spec (not full JSON Schema); sync and async funcs both work (sync is auto-wrapped with `asyncio.to_thread`). `ToolError(message, code)` signals a handled failure. `ToolRegistry` caches generated schemas and supports `derived(exclude={...})` for filtered tool sets.
 
-The kernel ships **no** tools. `ezwork/tools/` provides reference implementations: `ReadTool`, `WriteTool`, `EditTool`, `BashTool`. The bash tool auto-detects the best available shell (bash → sh → PowerShell → cmd) at construction and bakes the active shell's syntax hint into its description.
+The kernel ships **no** tools. `ezwork/tools/` provides reference implementations: `ReadTool`, `WriteTool`, `EditTool`, `BashTool`. The bash tool auto-detects the best available shell (bash → sh → PowerShell → cmd) lazily — on first schema generation — and bakes the active shell's syntax hint into its description, so startup never pays the detection probes.
 
 ## 7. Prompts (`core/prompt.py`)
 

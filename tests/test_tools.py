@@ -235,17 +235,39 @@ def test_detect_shell_finds_something():
 
 
 def test_bash_tool_description_reflects_active_shell():
-    """The tool detects the shell at construction and bakes its syntax hint
-    into the description, so the model knows which command syntax to use."""
+    """The tool detects the shell lazily (on first schema generation) and bakes
+    its syntax hint into the description, so the model knows which command
+    syntax to use."""
     from ezwork.tools.bash import _SHELL_HINTS, detect_shell
 
     tool = BashTool()
+    # Lazy: construction does not probe the shell — the description is neutral.
+    assert "Active shell" not in tool.description
+    schema = tool.to_schema()
     info = detect_shell()
-    assert tool._family == info.family
     # the family-specific hint must be present in the rendered description
     assert _SHELL_HINTS[info.family] in tool.description
+    assert _SHELL_HINTS[info.family] in schema["function"]["description"]
     # the neutral base is always present
     assert "persistent session" in tool.description
+
+
+def test_bash_tool_detection_happens_once_lazily(monkeypatch):
+    """Construction must not probe the shell (startup stays cheap); the probe
+    runs exactly once, on first schema generation."""
+    import ezwork.tools.bash as bash_mod
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        bash_mod, "detect_shell", lambda: calls.append(1) or bash_mod.ShellInfo(Path("/bin/bash"), "bash")
+    )
+    tool = BashTool()
+    assert calls == []  # no probe at construction
+    tool.to_schema()
+    assert len(calls) == 1
+    tool.to_schema()  # cached — no re-probe
+    assert len(calls) == 1
+    assert "Active shell: bash" in tool.description
 
 
 def test_bash_tool_description_per_family():
