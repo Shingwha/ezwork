@@ -12,7 +12,9 @@ import subprocess
 import sys
 import time
 
-from ezwork.app import cli
+import ezwork.app.cli as cli  # entry: main, oneshot, _enable_ansi
+from ezwork.app.cli import app as cli_app  # build_agent
+from ezwork.app.cli import stdin as cli_stdin  # _read_piped_stdin / _prompt_from_stdin
 
 
 class _FakeStdin:
@@ -40,7 +42,7 @@ def _pipe_stdin(monkeypatch, payload: bytes, close_write: bool) -> int:
     os.write(w, payload)
     if close_write:
         os.close(w)
-    monkeypatch.setattr(cli.sys, "stdin", _FakeStdin(fd=r, is_tty=False))
+    monkeypatch.setattr(cli_stdin.sys, "stdin", _FakeStdin(fd=r, is_tty=False))
     return r
 
 
@@ -50,37 +52,37 @@ def _pipe_stdin(monkeypatch, payload: bytes, close_write: bool) -> int:
 def test_piped_stdin_drains_until_eof(monkeypatch) -> None:
     """Piped input (`echo x | ezwork`) is read completely."""
     _pipe_stdin(monkeypatch, b"git diff output\n", close_write=True)
-    assert cli._read_piped_stdin() == "git diff output\n"
+    assert cli_stdin._read_piped_stdin() == "git diff output\n"
 
 
 def test_piped_stdin_never_closed_times_out(monkeypatch) -> None:
     """A never-closing pipe (sandbox/CI) must not hang: drain + timeout."""
     _pipe_stdin(monkeypatch, b"partial data", close_write=False)
-    monkeypatch.setattr(cli, "_STDIN_TIMEOUT", 0.1)
-    got = cli._read_piped_stdin()
+    monkeypatch.setattr(cli_stdin, "_STDIN_TIMEOUT", 0.1)
+    got = cli_stdin._read_piped_stdin()
     assert "partial data" in got  # whatever arrived is returned
 
 
 def test_piped_stdin_empty_pipe_returns_none(monkeypatch) -> None:
     r, w = os.pipe()
     os.close(w)  # nothing written, writer closed
-    monkeypatch.setattr(cli.sys, "stdin", _FakeStdin(fd=r, is_tty=False))
-    assert cli._read_piped_stdin() is None
+    monkeypatch.setattr(cli_stdin.sys, "stdin", _FakeStdin(fd=r, is_tty=False))
+    assert cli_stdin._read_piped_stdin() is None
 
 
 def test_piped_stdin_tty_returns_none(monkeypatch) -> None:
     """Interactive terminals must never block or consume stdin."""
-    monkeypatch.setattr(cli.sys, "stdin", _FakeStdin(text="ignored", is_tty=True))
-    assert cli._read_piped_stdin() is None
+    monkeypatch.setattr(cli_stdin.sys, "stdin", _FakeStdin(text="ignored", is_tty=True))
+    assert cli_stdin._read_piped_stdin() is None
 
 
 def test_piped_stdin_silent_open_pipe_returns_quickly(monkeypatch) -> None:
     """A silent inherited pipe (CI, sub-agents) must not wait out the full
     2s drain window — the first-byte grace period is all it costs."""
     r, w = os.pipe()  # nothing written, writer kept open
-    monkeypatch.setattr(cli.sys, "stdin", _FakeStdin(fd=r, is_tty=False))
+    monkeypatch.setattr(cli_stdin.sys, "stdin", _FakeStdin(fd=r, is_tty=False))
     start = time.monotonic()
-    assert cli._read_piped_stdin(first_byte_timeout=0.05) is None
+    assert cli_stdin._read_piped_stdin(first_byte_timeout=0.05) is None
     assert time.monotonic() - start < 1.0
 
 
@@ -88,10 +90,10 @@ def test_read_piped_stdin_honours_first_byte_timeout(monkeypatch) -> None:
     """The first-byte window is configurable: piped-context mode passes the
     short grace, `-p -` passes the full _STDIN_TIMEOUT."""
     r, w = os.pipe()
-    monkeypatch.setattr(cli.sys, "stdin", _FakeStdin(fd=r, is_tty=False))
-    monkeypatch.setattr(cli, "_STDIN_TIMEOUT", 0.4)
+    monkeypatch.setattr(cli_stdin.sys, "stdin", _FakeStdin(fd=r, is_tty=False))
+    monkeypatch.setattr(cli_stdin, "_STDIN_TIMEOUT", 0.4)
     start = time.monotonic()
-    assert cli._read_piped_stdin(first_byte_timeout=cli._STDIN_TIMEOUT) is None
+    assert cli_stdin._read_piped_stdin(first_byte_timeout=cli_stdin._STDIN_TIMEOUT) is None
     assert time.monotonic() - start >= 0.3  # waited the full window, not the grace
 
 
@@ -100,19 +102,19 @@ def test_read_piped_stdin_honours_first_byte_timeout(monkeypatch) -> None:
 
 def test_prompt_from_stdin_pipe(monkeypatch) -> None:
     _pipe_stdin(monkeypatch, b"summarize this diff", close_write=True)
-    assert cli._prompt_from_stdin() == "summarize this diff"
+    assert cli_stdin._prompt_from_stdin() == "summarize this diff"
 
 
 def test_prompt_from_stdin_tty_reads_to_eof(monkeypatch) -> None:
     """TTY stdin behaves like `cat -`: read until EOF (Ctrl-D)."""
-    monkeypatch.setattr(cli.sys, "stdin", _FakeStdin(text="multi\nline\n", is_tty=True))
-    assert cli._prompt_from_stdin() == "multi\nline\n"
+    monkeypatch.setattr(cli_stdin.sys, "stdin", _FakeStdin(text="multi\nline\n", is_tty=True))
+    assert cli_stdin._prompt_from_stdin() == "multi\nline\n"
 
 
 def test_prompt_from_stdin_empty_exits_2(monkeypatch) -> None:
     _pipe_stdin(monkeypatch, b"", close_write=True)
     try:
-        cli._prompt_from_stdin()
+        cli_stdin._prompt_from_stdin()
     except SystemExit as exc:
         assert exc.code == 2
     else:
@@ -124,10 +126,10 @@ def test_prompt_from_stdin_silent_pipe_still_errors(monkeypatch) -> None:
     prompt is expected on stdin, so the full first-byte window applies
     (unlike piped-context mode, which uses the short grace)."""
     r, w = os.pipe()
-    monkeypatch.setattr(cli.sys, "stdin", _FakeStdin(fd=r, is_tty=False))
-    monkeypatch.setattr(cli, "_STDIN_TIMEOUT", 0.05)
+    monkeypatch.setattr(cli_stdin.sys, "stdin", _FakeStdin(fd=r, is_tty=False))
+    monkeypatch.setattr(cli_stdin, "_STDIN_TIMEOUT", 0.05)
     try:
-        cli._prompt_from_stdin()
+        cli_stdin._prompt_from_stdin()
     except SystemExit as exc:
         assert exc.code == 2
     else:
@@ -170,9 +172,9 @@ def test_build_agent_warms_up_provider(monkeypatch) -> None:
             calls["n"] += 1
 
     monkeypatch.setattr(Config, "build_provider", lambda self: FakeProvider())
-    monkeypatch.setattr(cli, "build_system_prompt", lambda **kw: "system")
-    monkeypatch.setattr(cli, "_build_tools", lambda timeout: ToolRegistry())
-    agent = cli.build_agent(Config(), render=False)
+    monkeypatch.setattr(cli_app, "build_system_prompt", lambda **kw: "system")
+    monkeypatch.setattr(cli_app, "_build_tools", lambda timeout: ToolRegistry())
+    agent = cli_app.build_agent(Config(), render=False)
     assert calls["n"] == 1
     assert agent is not None
 

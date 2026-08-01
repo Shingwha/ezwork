@@ -181,6 +181,7 @@ Provider errors never crash the process: the kernel emits `ErrorEvent`, the CLI'
 - 安装/移除依赖：`uv add <pkg>` / `uv remove <pkg>`（依赖声明在 pyproject.toml）
 - 安装 CLI 工具：`uv tool install <pkg>`
 - Python 版本：用 `uv python` 管理，勿手动改系统解释器
+- **坑（2026-02）**：裸 `uv sync` 会按当前 extra 配置**裁剪** dev 依赖（pytest 等被移除，之后 `uv run pytest` 报 program not found）。测试前用 `uv sync --extra dev`（或 `--all-extras`）
 
 ## 10. Testing
 

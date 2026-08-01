@@ -12,6 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Ezwork" }]
 dependencies = [
     "openai>=1.0",
+    "prompt_toolkit>=3.0",
 ]
 
 [project.optional-dependencies]
