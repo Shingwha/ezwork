@@ -10,15 +10,15 @@ Turn layout:
     ❯ how does auth work?                  <- typed at the prompt
     ┊ scanning the routes first…           <- thinking, dim, per line
     answer streams here as plain text…
-    → running 2 tools: read×2, bash        <- one dim line while tools run
-    ✓ read×2 (auth.py, config.py)  0.3s    <- replaces the running line
-    ✓ bash (uv run pytest -q)       8.1s
-    ────────────────────────────────       <- divider between iterations
+    → running 3 tools: read(auth.py), read(config.py), bash(uv run pytest -q)
+    ✓ read (auth.py)  0.3s                 <- replaces the running line
+    ✓ read (config.py)  0.2s
+    ✓ bash (uv run pytest -q)  8.1s
     ↑1,234 ↓567 tokens                     <- dim usage, end of turn
+    ────────────────────────────────       <- divider at end of turn
 
 Design rules:
-  - Parallel tool calls of one batch collapse into grouped result lines
-    (read/write/edit/glob/grep merge; everything else keeps its own line).
+  - Every tool call of a batch gets its own result line (no grouping).
   - All color decisions live in Palette; when stdout is not a TTY every
     code is empty, so call sites never branch.
   - Oneshot mode never constructs a Display — stdout stays clean for scripts.
@@ -33,7 +33,7 @@ import sys
 import time
 from dataclasses import dataclass
 
-from ..utils import group_items, merge_summaries, oneline
+from ..utils import oneline, tool_summary
 
 
 # ─── palette ────────────────────────────────────────────────────────────────
@@ -207,27 +207,18 @@ class Display:
         if not calls:
             return
         self._batch = calls
-        groups = group_items(
-            calls,
-            get_name=lambda c: c.name,
-            get_args=lambda c: c.args,
-        )
-        total = sum(len(s) for _, s in groups)
+        total = len(calls)
         label = "running 1 tool" if total == 1 else f"running {total} tools"
         parts = []
-        for name, summaries in groups:
-            if total == 1:
-                parts.append(f"{name}({merge_summaries(summaries)})")
-            elif len(summaries) > 1:
-                parts.append(f"{name}×{len(summaries)}")
-            else:
-                parts.append(name)
+        for c in calls:
+            summary = tool_summary(c.name, c.args)
+            parts.append(f"{c.name}({summary})" if summary else c.name)
         line = f"→ {label}: {', '.join(parts)}"
         self._print(Palette.paint(line, "dim"))
         self._running_line = True
 
     def _flush_tool_batch(self) -> None:
-        """Print grouped result lines, replacing the running line in place."""
+        """Print one result line per call, replacing the running line in place."""
         batch = self._batch
         self._batch = None
         if not batch:
@@ -236,32 +227,20 @@ class Display:
         if self._tty and self._running_line:
             self._print("\033[1A\033[K", end="", flush=True)
         self._running_line = False
-        groups = group_items(
-            batch,
-            get_name=lambda c: c.name,
-            get_args=lambda c: c.args,
-        )
-        for name, summaries in groups:
-            members = [c for c in batch if c.name == name]
-            ok = all(c.ok for c in members)
-            elapsed = max(c.elapsed for c in members)
-            merged = merge_summaries(summaries)
-            label = name
-            if len(summaries) > 1:
-                label += f"×{len(summaries)}"
-            if merged:
-                label += f" ({merged})"
+        for call in batch:
+            label = call.name
+            summary = tool_summary(call.name, call.args)
+            if summary:
+                label += f" ({summary})"
             parts = [
-                Palette.paint("✓" if ok else "✗", "success" if ok else "error"),
+                Palette.paint("✓" if call.ok else "✗", "success" if call.ok else "error"),
                 label,
             ]
-            if ok:
-                if elapsed >= 0.1:
-                    parts.append(Palette.paint(f"{elapsed:.1f}s", "dim"))
-            else:
-                msg = next((c.error for c in members if c.error), "")
-                if msg:
-                    parts.append(Palette.paint(msg, "error"))
+            if call.ok:
+                if call.elapsed >= 0.1:
+                    parts.append(Palette.paint(f"{call.elapsed:.1f}s", "dim"))
+            elif call.error:
+                parts.append(Palette.paint(call.error, "error"))
             self._print(" ".join(parts))
 
     # ── event handlers ──
@@ -269,7 +248,6 @@ class Display:
     def _on_iter_start(self, event) -> None:
         if event.iteration > 0:
             self._close_section()
-            self.divider()
 
     def _on_stream_chunk(self, event) -> None:
         chunk = event.chunk
@@ -381,7 +359,7 @@ class Display:
                 i += 1
 
     def _render_tool_calls(self, tcs: list[dict], tool_messages: list[dict]) -> None:
-        """Re-render tool calls from history, with grouped ✓/✗ lines."""
+        """Re-render tool calls from history, one ✓/✗ line per call."""
         errors: dict[str, str] = {}
         for msg in tool_messages:
             content = msg.get("content", "")
@@ -391,14 +369,11 @@ class Display:
                     if tc.get("id") == tcid:
                         errors[tc.get("function", {}).get("name", "?")] = content[:80]
                         break
-        groups = group_items(
-            tcs,
-            get_name=lambda tc: tc.get("function", {}).get("name", "?"),
-            get_args=lambda tc: _args_dict(tc.get("function", {}).get("arguments", "")),
-        )
-        for name, summaries in groups:
-            merged = merge_summaries(summaries)
-            label = name + (f" ({merged})" if merged else "")
+        for tc in tcs:
+            fn = tc.get("function", {})
+            name = fn.get("name", "?")
+            summary = tool_summary(name, _args_dict(fn.get("arguments", "")))
+            label = name + (f" ({summary})" if summary else "")
             if name in errors:
                 msg = errors[name]
                 if msg.startswith("[error] "):

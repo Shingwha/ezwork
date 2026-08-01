@@ -38,7 +38,7 @@ def test_answer_streams_plain(capsys) -> None:
 
 
 def test_tool_batch_groups_parallel_reads(capsys) -> None:
-    """Two parallel reads collapse into one grouped ✓ line."""
+    """Two parallel reads each get their own ✓ line (no grouping)."""
     d = Display()
     response = Response(
         content=None,
@@ -55,7 +55,9 @@ def test_tool_batch_groups_parallel_reads(capsys) -> None:
 
     out = capsys.readouterr().out
     assert "running 2 tools" in out
-    assert "✓ read×2 (a.py, b.py)" in out
+    assert "✓ read (a.py)" in out
+    assert "✓ read (b.py)" in out
+    assert "read×2" not in out
     # NB: no usage line here — tool-call iterations never print it (the
     # final text iteration does, see test_usage_line_on_final_iteration).
 
