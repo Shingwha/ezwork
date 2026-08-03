@@ -15,10 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .commands import CommandRegistry
 
 _PASTE_LINE_THRESHOLD = 5
 _PASTE_CHAR_THRESHOLD = 200

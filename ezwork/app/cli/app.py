@@ -18,7 +18,6 @@ import signal
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 from ezwork import __version__
 from ezwork.core import Agent, LoopConfig, ToolRegistry
@@ -26,7 +25,7 @@ from ezwork.tools import BashTool, EditTool, ReadTool, WriteTool
 
 from ..config import DEFAULT_CONFIG_PATH, Config
 from ..prompt import build_system_prompt
-from ..session import Session, SessionManager, SessionStore
+from ..session import Session, SessionManager
 from .commands import CommandContext, CommandRegistry, CommandResult, commands as builtin_commands
 from .input import Input
 from .display import Display

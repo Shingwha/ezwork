@@ -7,6 +7,8 @@ virtual filesystem). All tools operate directly on the local filesystem.
 from __future__ import annotations
 
 import os
+import threading
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from ezwork.core import Tool, ToolError
@@ -163,9 +165,6 @@ class WriteTool(Tool):
 
 # ---- edit ----
 
-import os
-import threading
-from difflib import SequenceMatcher
 
 _EDIT_LOCKS: dict[str, threading.Lock] = {}
 _EDIT_LOCKS_GUARD = threading.Lock()
@@ -266,7 +265,7 @@ class EditTool(Tool):
                 f"old_string not found in {name} — but new_string IS present in "
                 "the file. Did you swap old_string and new_string?"
             )
-        return f"old_string not found in file" + _closest_line_hint(text, old)
+        return "old_string not found in file" + _closest_line_hint(text, old)
 
     @staticmethod
     def _not_unique_msg(text: str, old: str, count: int) -> str:

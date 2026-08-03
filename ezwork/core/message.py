@@ -25,7 +25,7 @@ light sanitisation (e.g. dropping orphan tool_calls).
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import Any
 
 
 # Type aliases — all just dict at runtime; these are for readability/tooling.

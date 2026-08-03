@@ -28,7 +28,7 @@ import asyncio
 import threading
 from typing import Any, AsyncIterator
 
-from ezwork.core import StreamChunk, ThinkingPreset, ThinkingParams, Usage
+from ezwork.core import StreamChunk, ThinkingPreset, Usage
 
 
 class OpenAIProvider:

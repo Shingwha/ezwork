@@ -91,7 +91,7 @@ class StreamChunk:
         )
 
     @staticmethod
-    def usage(usage: Usage) -> StreamChunk:
+    def usage(usage: Usage) -> StreamChunk:  # noqa: F811 — factory shadows the field of the same name
         return StreamChunk(type="usage", usage=usage)
 
     @staticmethod
@@ -99,7 +99,7 @@ class StreamChunk:
         return StreamChunk(type="done", finish_reason=finish_reason)
 
     @staticmethod
-    def error(message: str) -> StreamChunk:
+    def error(message: str) -> StreamChunk:  # noqa: F811 — factory shadows the field of the same name
         return StreamChunk(type="error", error=message)
 
 
