@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 from ezwork.app.cli.display import Display
 from ezwork.core.event import (
     IterEndEvent,
@@ -54,12 +56,43 @@ def test_tool_batch_groups_parallel_reads(capsys) -> None:
     d(IterEndEvent(final_content=None))
 
     out = capsys.readouterr().out
-    assert "running 2 tools" in out
     assert "✓ read (a.py)" in out
     assert "✓ read (b.py)" in out
     assert "read×2" not in out
+    # No batch announcement line and no placeholders on non-TTY output.
+    assert "running" not in out
+    assert "· read" not in out
     # NB: no usage line here — tool-call iterations never print it (the
     # final text iteration does, see test_usage_line_on_final_iteration).
+
+
+def test_tool_batch_tty_placeholder_lit_in_place(monkeypatch, capsys) -> None:
+    """TTY: dim placeholders up front, each replaced in place on completion."""
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    d = Display()
+    response = Response(
+        content=None,
+        tool_calls=[_tc("c1", "read", '{"path": "a.py"}'), _tc("c2", "read", '{"path": "b.py"}')],
+        finish_reason="tool_calls",
+    )
+    d(ResponseEvent(response=response, usage=None))
+    out = capsys.readouterr().out
+    assert "· read (a.py)…" in out
+    assert "· read (b.py)…" in out
+
+    d(ToolStartEvent(tool_call=_tc("c1", "read", '{"path": "a.py"}')))
+    d(ToolCompleteEvent(tool_call=_tc("c1", "read", ""), tool_result={"role": "tool", "content": "ok"}))
+    out = capsys.readouterr().out
+    # Row 1 of 2: move up 2 rows, clear, write the ✓ line, back to bottom.
+    assert "\x1b[2A\x1b[K" in out and "✓" in out and "read (a.py)" in out
+    assert "\x1b[2B\r" in out
+
+    d(ToolStartEvent(tool_call=_tc("c2", "read", '{"path": "b.py"}')))
+    d(ToolCompleteEvent(tool_call=_tc("c2", "read", ""), tool_result={"role": "tool", "content": "ok"}))
+    out = capsys.readouterr().out
+    # Row 2 of 2: move up 1 row, clear, write the ✓ line, back to bottom.
+    assert "\x1b[1A\x1b[K" in out and "✓" in out and "read (b.py)" in out
+    d(IterEndEvent(final_content=None))
 
 
 def test_tool_batch_shows_error(capsys) -> None:

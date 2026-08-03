@@ -10,15 +10,23 @@ Turn layout:
     ❯ how does auth work?                  <- typed at the prompt
     ┊ scanning the routes first…           <- thinking, dim, per line
     answer streams here as plain text…
-    → running 3 tools: read(auth.py), read(config.py), bash(uv run pytest -q)
-    ✓ read (auth.py)  0.3s                 <- replaces the running line
-    ✓ read (config.py)  0.2s
+    · read (auth.py)…                      <- one dim placeholder per call
+    · read (config.py)…
+    · bash (uv run pytest -q)…
+    ✓ read (auth.py)  0.3s                 <- each completion lit in place
+    · read (config.py)…                    <- still running
     ✓ bash (uv run pytest -q)  8.1s
     ↑1,234 ↓567 tokens                     <- dim usage, end of turn
     ────────────────────────────────       <- divider at end of turn
 
 Design rules:
-  - Every tool call of a batch gets its own result line (no grouping).
+  - Every tool call of a batch gets its own line (no grouping): a dim
+    '· name (args)…' placeholder is printed up front and replaced in place by
+    the final '✓/✗ name (args)  time' line when that call completes. Non-TTY
+    output skips the placeholders and appends completion lines directly.
+  - A tool batch owns a contiguous block of rows: answer text always streams
+    before it and the next batch waits for this one, so row offsets never
+    drift. Any other output (Ctrl-C, info, usage) freezes the block first.
   - All color decisions live in Palette; when stdout is not a TTY every
     code is empty, so call sites never branch.
   - Oneshot mode never constructs a Display — stdout stays clean for scripts.
@@ -93,11 +101,13 @@ class _BatchCall:
 
     call_id: str  # tool_call id — the reliable match key
     name: str
-    args: dict  # parsed arguments (grouping/summary source)
+    args: dict  # parsed arguments (summary source)
     started: float
     ok: bool = True
     error: str = ""
     elapsed: float = 0.0
+    row_offset: int = 0  # TTY: rows from this placeholder up to the block bottom
+    done: bool = False   # completion line already rendered?
 
 
 class Display:
@@ -119,7 +129,6 @@ class Display:
         self._usage = None
         self._last_flush = time.monotonic()
         self._batch: list[_BatchCall] | None = None
-        self._running_line = False       # is the "→ running…" line the last line?
 
     # ── public helpers for the REPL (non-streaming) ──
 
@@ -160,11 +169,12 @@ class Display:
     # ── output primitives ──
 
     def _print(self, text: str = "", *, end: str = "\n", flush: bool = True) -> None:
+        if self._tty:
+            self._finalize_tool_block()  # any non-completion output freezes it
         print(text, end=end, flush=flush)
         if flush:
             self._last_flush = time.monotonic()
         self._at_line_start = end == "\n" or text.endswith("\n")
-        self._running_line = False  # any output invalidates the in-place replace
 
     @staticmethod
     def _terminal_width() -> int:
@@ -192,7 +202,13 @@ class Display:
     # ── tool batch rendering ──
 
     def _start_tool_batch(self, tool_calls: list[dict]) -> None:
-        """A new batch of parallel tool calls is about to run."""
+        """A new batch of parallel tool calls is about to run.
+
+        TTY: print one dim placeholder line per call; each is replaced in
+        place by its final line when that call completes. Non-TTY: print
+        nothing up front — completions are appended as they finish.
+        """
+        self._finalize_tool_block()  # safety: a stale batch must never linger
         calls = []
         for tc in tool_calls:
             fn = tc.get("function", {})
@@ -206,42 +222,58 @@ class Display:
             )
         if not calls:
             return
+        if self._tty:
+            total = len(calls)
+            for i, c in enumerate(calls):
+                c.row_offset = total - i
+                self._print(Palette.paint(f"· {self._tool_label(c)}…", "dim"))
         self._batch = calls
-        total = len(calls)
-        label = "running 1 tool" if total == 1 else f"running {total} tools"
-        parts = []
-        for c in calls:
-            summary = tool_summary(c.name, c.args)
-            parts.append(f"{c.name}({summary})" if summary else c.name)
-        line = f"→ {label}: {', '.join(parts)}"
-        self._print(Palette.paint(line, "dim"))
-        self._running_line = True
 
-    def _flush_tool_batch(self) -> None:
-        """Print one result line per call, replacing the running line in place."""
-        batch = self._batch
+    def _finalize_tool_block(self) -> None:
+        """Freeze the running batch (idempotent).
+
+        Pending placeholders stay as their dim '·' lines — a valid end state —
+        and any later completions fall back to appending. Called before any
+        output that is not a completion line, so row offsets never drift.
+        """
         self._batch = None
-        if not batch:
-            return
-        # Replace the "→ running…" line only if it is still the last line.
-        if self._tty and self._running_line:
-            self._print("\033[1A\033[K", end="", flush=True)
-        self._running_line = False
-        for call in batch:
-            label = call.name
-            summary = tool_summary(call.name, call.args)
-            if summary:
-                label += f" ({summary})"
-            parts = [
-                Palette.paint("✓" if call.ok else "✗", "success" if call.ok else "error"),
-                label,
-            ]
-            if call.ok:
-                if call.elapsed >= 0.1:
-                    parts.append(Palette.paint(f"{call.elapsed:.1f}s", "dim"))
-            elif call.error:
-                parts.append(Palette.paint(call.error, "error"))
-            self._print(" ".join(parts))
+
+    def _tool_label(self, call: _BatchCall) -> str:
+        """'read (auth.py)' — name plus the argument summary when available."""
+        summary = tool_summary(call.name, call.args)
+        return f"{call.name} ({summary})" if summary else call.name
+
+    def _render_tool_line(self, call: _BatchCall) -> None:
+        """Final line for one completed call — lit in place (TTY) or appended."""
+        parts = [
+            Palette.paint("✓" if call.ok else "✗", "success" if call.ok else "error"),
+            self._tool_label(call),
+        ]
+        if call.ok:
+            if call.elapsed >= 0.1:
+                parts.append(Palette.paint(f"{call.elapsed:.1f}s", "dim"))
+        elif call.error:
+            parts.append(Palette.paint(call.error, "error"))
+        line = self._fit(" ".join(parts))
+        if self._tty and self._batch is not None:
+            # Move up to the placeholder row, clear it, write the final line,
+            # then return to the block bottom (one row below the last call).
+            sys.stdout.write(
+                f"\033[{call.row_offset}A\033[K{line}\033[{call.row_offset}B\r"
+            )
+            sys.stdout.flush()
+            self._last_flush = time.monotonic()
+            self._at_line_start = True
+        else:
+            self._print(line)
+
+    def _fit(self, text: str) -> str:
+        """Truncate to the terminal width — a wrapped line would desync the
+        in-place replacement row math."""
+        limit = self._width - 2
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1] + "…"
 
     # ── event handlers ──
 
@@ -273,7 +305,6 @@ class Display:
         self._close_section()
         if event.usage:
             self._usage = event.usage
-        self._flush_tool_batch()  # safety: a pending batch flushes here too
         response = event.response
         if response is not None and getattr(response, "tool_calls", None):
             self._start_tool_batch(response.tool_calls)
@@ -293,17 +324,20 @@ class Display:
         content = (event.tool_result or {}).get("content", "")
         ok = not content.startswith("[error]")
         for call in self._batch or []:
-            if call.call_id == call_id and call.started != 0.0:
+            if call.call_id == call_id and not call.done:
                 call.ok = ok
-                call.elapsed = time.monotonic() - call.started
+                call.elapsed = (
+                    time.monotonic() - call.started if call.started > 0 else 0.0
+                )
                 if not ok:
                     call.error = oneline(content[len("[error]") :].strip(), 90)
-                call.started = -1.0  # mark consumed
+                call.done = True
+                self._render_tool_line(call)
                 break
 
     def _on_iter_end(self, event) -> None:
-        # End-of-turn summary: flush tools, then the dim usage line.
-        self._flush_tool_batch()
+        # End-of-turn summary: the dim usage line (the tool block is frozen by
+        # _print's guard if anything is printed).
         if event.final_content is not None and self._usage:
             u = self._usage
             self._print(
