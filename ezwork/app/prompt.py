@@ -242,10 +242,14 @@ def _find_project_agents(cwd: str) -> Path | None:
 def _render_agents(home: str, cwd: str) -> str:
     """Persistent-memory guide + merged global ~/.ezwork/AGENTS.md and the
     nearest project AGENTS.md, each labelled with its source path so the
-    agent knows where to write."""
+    agent knows where to write. The project lookup walks up from cwd, so when
+    cwd is under ~/.ezwork it may find the global file itself — dedupe it."""
     parts: list[str] = []
     global_p = Path(home) / ".ezwork" / "AGENTS.md"
-    for label, p in (("Global memory", global_p), ("Project memory", _find_project_agents(cwd))):
+    project_p = _find_project_agents(cwd)
+    if project_p is not None and project_p.resolve() == global_p.resolve():
+        project_p = None  # same file as global — don't double-inject
+    for label, p in (("Global memory", global_p), ("Project memory", project_p)):
         if p is None:
             continue
         try:

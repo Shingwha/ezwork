@@ -137,3 +137,20 @@ def test_build_system_prompt_assembles_dynamic_sections(tmp_path):
     assert str(tmp_path) in prompt                       # environment section
     assert 'name="demo"' in prompt                       # skills block injected
     assert "## project rule" in prompt                   # AGENTS.md injected
+
+
+def test_project_agents_dedupes_global_when_cwd_under_home(tmp_path):
+    """cwd under ~/.ezwork: the nearest project AGENTS.md IS the global file;
+    it must be injected once, not twice."""
+    from ezwork.app.prompt import _render_agents
+
+    agents = tmp_path / ".ezwork" / "AGENTS.md"
+    agents.parent.mkdir(parents=True)
+    agents.write_text("## global rule\nonly once\n", encoding="utf-8")
+    cwd = tmp_path / ".ezwork" / "skills" / "some-tool"
+    cwd.mkdir(parents=True)
+
+    txt = _render_agents(home=str(tmp_path), cwd=str(cwd))
+    assert txt.count("## global rule") == 1
+    assert txt.count("Global memory") == 1
+    assert "Project memory" not in txt
