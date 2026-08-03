@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -163,11 +164,16 @@ class CLIApp:
         self._resume_id = resume_id
 
         # Per-turn accounting, persisted into the session log on save:
-        # cumulative tool call/failure tallies + the latest turn's outcome.
+        # cumulative tool call/failure tallies, per-call usage/tool events
+        # for the current turn, and the latest turn's outcome + duration.
         self._tool_stats: dict[str, int] = {}
         self._tool_failures: dict[str, int] = {}
+        self._pending_usages: list[dict] = []  # one per LLM call this turn
+        self._pending_tools: list[dict] = []  # one per tool call this turn
+        self._tool_start_times: dict[str, float] = {}
         self._turn_interrupted = False
         self._turn_error: str | None = None
+        self._turn_elapsed_ms: int | None = None
 
     # ── agent construction ──
 
@@ -178,32 +184,66 @@ class CLIApp:
             model_override=self.model_override,
             on_error=None if self.interactive else self.errors.append,
             renderer=self.display,
-            on_tool_event=self._on_tool_event,
+            on_tool_event=self._on_agent_event,
         )
 
-    def _on_tool_event(self, e: object) -> None:
-        """Tally tool calls/failures from the agent's event stream.
-
-        A tool result is a failure when its content carries the `[error`
-        prefix the kernel uses for ToolError / vetoed calls."""
-        if e.type == "tool_start":
-            name = (e.tool_call or {}).get("function", {}).get("name", "?")
-            self._tool_stats[name] = self._tool_stats.get(name, 0) + 1
-        elif e.type == "tool_complete":
-            name = (e.tool_call or {}).get("function", {}).get("name", "?")
-            content = (e.tool_result or {}).get("content", "")
-            if isinstance(content, str) and content.startswith("[error"):
-                self._tool_failures[name] = self._tool_failures.get(name, 0) + 1
-
-    def _usage_dict(self) -> dict[str, int]:
-        """Agent cumulative usage as a flat dict (cache fields when present)."""
-        u = self.agent.total_usage
+    @staticmethod
+    def _usage_to_dict(u) -> dict[str, int]:
+        """A Usage (or None) as a flat dict; cache fields when present."""
+        if u is None:
+            return {}
         d = {"prompt_tokens": u.prompt_tokens, "completion_tokens": u.completion_tokens}
         if u.prompt_cache_hit_tokens is not None:
             d["prompt_cache_hit_tokens"] = u.prompt_cache_hit_tokens
         if u.prompt_cache_miss_tokens is not None:
             d["prompt_cache_miss_tokens"] = u.prompt_cache_miss_tokens
         return d
+
+    def _on_agent_event(self, e: object) -> None:
+        """Collect per-call usage/tool events and tool tallies from the
+        agent's event stream.
+
+        A tool result is a failure when its content carries the `[error`
+        prefix the kernel uses for ToolError / vetoed calls."""
+        t = e.type
+        if t == "tool_start":
+            tc = e.tool_call or {}
+            name = tc.get("function", {}).get("name", "?")
+            self._tool_stats[name] = self._tool_stats.get(name, 0) + 1
+            self._tool_start_times[tc.get("id", "")] = time.monotonic()
+        elif t == "tool_complete":
+            tc = e.tool_call or {}
+            name = tc.get("function", {}).get("name", "?")
+            content = (e.tool_result or {}).get("content", "")
+            ok = not (isinstance(content, str) and content.startswith("[error"))
+            if not ok:
+                self._tool_failures[name] = self._tool_failures.get(name, 0) + 1
+            start = self._tool_start_times.pop(tc.get("id", ""), None)
+            self._pending_tools.append(
+                {
+                    "tool_call_id": tc.get("id", ""),
+                    "name": name,
+                    "ok": ok,
+                    "elapsed_ms": int((time.monotonic() - start) * 1000) if start else None,
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }
+            )
+        elif t == "response":
+            self._pending_usages.append(
+                {
+                    "iteration": e.iteration,
+                    "usage": self._usage_to_dict(e.usage),
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }
+            )
+
+    def _usage_dict(self) -> dict[str, int]:
+        """Agent cumulative usage as a flat dict (cache fields when present)."""
+        return self._usage_to_dict(self.agent.total_usage)
+
+    def _active_model(self) -> str:
+        """The model actually in use (honours a --model override)."""
+        return getattr(self.agent.provider, "model", "") or self.config.model
 
     # ── session lifecycle ──
 
@@ -212,8 +252,8 @@ class CLIApp:
 
         Sync by design: called both from the async REPL loop and from the
         sync KeyboardInterrupt path of run(), where awaiting is impossible.
-        The write appends only the new messages + one round event — a few ms
-        of I/O is fine."""
+        The write appends only the new messages + per-call events + one
+        round event — a few ms of I/O is fine."""
         if not self.agent.messages:
             return
         self.session_mgr.save(
@@ -222,13 +262,19 @@ class CLIApp:
             tool_stats=self._tool_stats,
             tool_failures=self._tool_failures,
             system_prompt=self.agent.system_prompt,
-            model=self.config.model,
+            model=self._active_model(),
             provider=self.config.provider,
             interrupted=self._turn_interrupted,
             error=self._turn_error,
+            usages=self._pending_usages,
+            tools=self._pending_tools,
+            elapsed_ms=self._turn_elapsed_ms,
         )
+        self._pending_usages.clear()
+        self._pending_tools.clear()
         self._turn_interrupted = False
         self._turn_error = None
+        self._turn_elapsed_ms = None
 
     def _apply_resumed(self, session: Session) -> None:
         """Load a session's messages into the agent and adopt its system
@@ -267,8 +313,12 @@ class CLIApp:
         )
         self._tool_stats.clear()
         self._tool_failures.clear()
+        self._pending_usages.clear()
+        self._pending_tools.clear()
+        self._tool_start_times.clear()
         self._turn_interrupted = False
         self._turn_error = None
+        self._turn_elapsed_ms = None
         self.session_mgr.clear()
 
     # ── dispatch ──
@@ -305,6 +355,7 @@ class CLIApp:
 
     async def _run_chat(self, prompt: str) -> None:
         """Send prompt to the agent with SIGINT cancellation."""
+        t0 = time.monotonic()
         task = asyncio.ensure_future(self.agent.chat(prompt))
         cancelled = False
 
@@ -324,6 +375,7 @@ class CLIApp:
             self._turn_error = str(e)
             self.display.error(f"[error] {e}")
         finally:
+            self._turn_elapsed_ms = int((time.monotonic() - t0) * 1000)
             signal.signal(signal.SIGINT, original)
 
     # ── REPL ──
@@ -402,15 +454,19 @@ class CLIApp:
                 return 1
             self._apply_resumed(session)
 
+        t0 = time.monotonic()
         try:
             answer = await self.agent.chat(prompt_text)
+            self._turn_elapsed_ms = int((time.monotonic() - t0) * 1000)
         except asyncio.CancelledError:
             self._turn_interrupted = True
+            self._turn_elapsed_ms = int((time.monotonic() - t0) * 1000)
             print("\n(interrupted)", file=sys.stderr)
             await self._persist(no_session=no_session)
             return 130
         except Exception as e:
             self._turn_error = str(e)
+            self._turn_elapsed_ms = int((time.monotonic() - t0) * 1000)
             print(f"[error] {e}", file=sys.stderr)
             await self._persist(no_session=no_session)
             return 1
@@ -443,8 +499,9 @@ class CLIApp:
     async def _persist(self, *, no_session: bool = False) -> None:
         """Save the active session if there is anything to save. Never raises.
 
-        The write is an incremental append of new messages + one round event
-        (a few KB at most), so it runs inline without stalling the loop."""
+        The write is an incremental append of new messages + per-call events
+        + one round event (a few KB at most), so it runs inline without
+        stalling the loop."""
         if no_session or not self.agent.messages:
             return
         try:
@@ -454,15 +511,21 @@ class CLIApp:
                 tool_stats=self._tool_stats,
                 tool_failures=self._tool_failures,
                 system_prompt=self.agent.system_prompt,
-                model=self.config.model,
+                model=self._active_model(),
                 provider=self.config.provider,
                 interrupted=self._turn_interrupted,
                 error=self._turn_error,
+                usages=self._pending_usages,
+                tools=self._pending_tools,
+                elapsed_ms=self._turn_elapsed_ms,
             )
         except Exception:
             pass
+        self._pending_usages.clear()
+        self._pending_tools.clear()
         self._turn_interrupted = False
         self._turn_error = None
+        self._turn_elapsed_ms = None
 
 
 __all__ = ["CLIApp", "build_agent", "_build_tools"]

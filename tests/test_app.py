@@ -57,6 +57,43 @@ def test_oneshot_answer_to_stdout_session_to_stderr(tmp_path, capsys) -> None:
     assert "[tokens: prompt=10 completion=5]" in err
 
 
+def test_oneshot_logs_per_call_usage_and_tool_events(tmp_path, capsys) -> None:
+    """The session log records one usage event per LLM call and one tool
+    event per tool call, with round-level aggregates."""
+    from tests import usage
+
+    provider = MockProvider(
+        [
+            [{"id": "c1", "name": "read", "arguments": {"path": "pyproject.toml"}}],
+            {"content": "done", "usage": usage(50, 7)},
+        ]
+    )
+    app = _make_app(provider, tmp_path, interactive=False)
+
+    rc = _run(app.run_oneshot("look at a.py"))
+    assert rc == 0
+
+    store = SessionStore(tmp_path / "sessions")
+    session = store.list(str(Path.cwd()))[0]
+    # Two LLM calls (tool-call round + final answer) — one usage event each.
+    # The first call's provider did not report usage -> recorded as {}.
+    assert len(session.iterations) == 2
+    assert session.iterations[0]["iteration"] == 0
+    assert session.iterations[0]["usage"] == {}
+    assert session.iterations[1]["usage"] == {"prompt_tokens": 50, "completion_tokens": 7}
+    # One tool call, successful, with timing.
+    assert len(session.tools) == 1
+    assert session.tools[0]["name"] == "read"
+    assert session.tools[0]["ok"] is True
+    # Round aggregates: cumulative usage, per-round delta, iteration count.
+    r = session.rounds[0]
+    assert r["iterations"] == 2
+    assert r["usage_total"] == {"prompt_tokens": 50, "completion_tokens": 7}
+    assert r["usage"] == {"prompt_tokens": 50, "completion_tokens": 7}
+    assert r["elapsed_ms"] is not None
+    assert r["model"] == "mock-model"
+
+
 def test_oneshot_no_session_flag(tmp_path, capsys) -> None:
     provider = MockProvider(["answer"])
     app = _make_app(provider, tmp_path, interactive=False)

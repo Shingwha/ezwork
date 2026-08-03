@@ -203,6 +203,63 @@ def test_manager_save_noop_without_new_messages(tmp_path) -> None:
     assert len(path.read_text(encoding="utf-8").splitlines()) == before
 
 
+def test_manager_records_per_call_usage_and_tool_events(tmp_path) -> None:
+    mgr = _manager(tmp_path)
+    mgr.create()
+    mgr.save(
+        [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "ok"}],
+        system_prompt="s",
+        usages=[
+            {"iteration": 0, "usage": {"prompt_tokens": 100, "completion_tokens": 10},
+             "ts": "2026-01-01T00:00:00"},
+            {"iteration": 1, "usage": {"prompt_tokens": 110, "completion_tokens": 12},
+             "ts": "2026-01-01T00:00:01"},
+        ],
+        tools=[
+            {"tool_call_id": "c1", "name": "read", "ok": True, "elapsed_ms": 5,
+             "ts": "2026-01-01T00:00:00"},
+            {"tool_call_id": "c2", "name": "bash", "ok": False, "elapsed_ms": 20,
+             "ts": "2026-01-01T00:00:02"},
+        ],
+        elapsed_ms=1500,
+    )
+    loaded = mgr.list()[0]
+    assert loaded.round_count == 1
+    assert len(loaded.iterations) == 2
+    assert loaded.iterations[0]["usage"]["prompt_tokens"] == 100
+    assert loaded.iterations[1]["round"] == 1
+    assert len(loaded.tools) == 2
+    assert loaded.tools[1]["ok"] is False
+    r = loaded.rounds[0]
+    # Round-level aggregates derived from the per-call events.
+    assert r["iterations"] == 2
+    assert r["elapsed_ms"] == 1500
+    assert r["usage"] == {"prompt_tokens": 210, "completion_tokens": 22}
+    assert r["model"] == ""
+    # Persisted lines: meta + 2 messages + 2 usage + 2 tool + 1 round.
+    path = _store(tmp_path).path_for("wd", mgr.active_id)
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 8
+
+
+def test_manager_round_records_model_and_usage_delta(tmp_path) -> None:
+    mgr = _manager(tmp_path, model="m1", provider="p")
+    mgr.create()
+    mgr.save([{"role": "user", "content": "one"}], system_prompt="s",
+             usages=[{"iteration": 0, "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+                      "ts": "t"}],
+             model="m2")
+    mgr.save([{"role": "user", "content": "one"}, {"role": "assistant", "content": "two"}],
+             system_prompt="s",
+             usage_total={"prompt_tokens": 12, "completion_tokens": 3},
+             usages=[{"iteration": 0, "usage": {"prompt_tokens": 7, "completion_tokens": 2},
+                      "ts": "t"}],
+             model="m2")
+    loaded = mgr.list()[0]
+    assert loaded.rounds[0]["model"] == "m2"
+    assert loaded.rounds[1]["usage"] == {"prompt_tokens": 7, "completion_tokens": 2}
+    assert loaded.rounds[1]["usage_total"] == {"prompt_tokens": 12, "completion_tokens": 3}
+
+
 def test_manager_records_interrupted_and_error(tmp_path) -> None:
     mgr = _manager(tmp_path)
     mgr.create()

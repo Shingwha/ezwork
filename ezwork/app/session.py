@@ -14,12 +14,18 @@ cheaply):
   meta      first line, written with the first save: static identity
             (id, schema, created_at, workdir, model, provider).
   message   one OpenAI-format message dict per line, appended in order.
-  round     one per completed turn: cumulative usage / tool stats, the
-            interrupted/error state, and the FULL system prompt that was in
-            effect for that turn (with its hash) — a session file therefore
-            holds one system prompt per round. Resuming uses the latest
-            round's prompt (prefix-cache friendly); replaying a specific
-            round can use the exact prompt that produced it.
+  round     one per completed turn: the model in effect, cumulative usage,
+            the interrupted/error state, elapsed time, and the FULL system
+            prompt that was in effect for that turn (with its hash) — a
+            session file therefore holds one system prompt per round.
+            Resuming uses the latest round's prompt (prefix-cache friendly);
+            replaying a specific round can use the exact prompt that
+            produced it.
+  usage     one per LLM call (each assistant message corresponds to one):
+            round, iteration, the call's token usage, and a timestamp — so
+            per-message token accounting is recoverable in line order.
+  tool      one per tool call (no arguments — kept secret-safe and small):
+            round, tool_call_id, name, ok, elapsed_ms, timestamp.
   compact   RESERVED for future compaction: a compaction is planned as one
             more appended event (summary + rebuilt system prompt) followed by
             normal message/round lines — lines are never deleted, so the full
@@ -63,6 +69,20 @@ def _dump_line(event: dict) -> str:
     return json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
 
 
+def _sum_usages(usages: list[dict[str, Any]]) -> dict[str, int]:
+    """Sum per-call usage dicts into one round-level delta (None usages —
+    providers that did not report — are skipped)."""
+    total: dict[str, int] = {}
+    for u in usages:
+        data = u.get("usage")
+        if not isinstance(data, dict):
+            continue
+        for k, v in data.items():
+            if isinstance(v, int):
+                total[k] = total.get(k, 0) + v
+    return total
+
+
 def _parse_line(line: str) -> dict | None:
     """Parse one event line. Returns None for malformed lines (interrupted
     writes, stray bytes) — callers skip them."""
@@ -98,6 +118,8 @@ class Session:
     provider: str = ""
     messages: list[dict[str, Any]] = field(default_factory=list)
     rounds: list[dict[str, Any]] = field(default_factory=list)
+    iterations: list[dict[str, Any]] = field(default_factory=list)  # usage events
+    tools: list[dict[str, Any]] = field(default_factory=list)  # tool events
     system_prompt: str = ""
     system_prompt_hash: str = ""
     usage_total: dict[str, int] = field(default_factory=dict)
@@ -132,6 +154,8 @@ class Session:
         meta: dict[str, Any] = {}
         messages: list[dict[str, Any]] = []
         rounds: list[dict[str, Any]] = []
+        iterations: list[dict[str, Any]] = []
+        tools: list[dict[str, Any]] = []
         for ev in events:
             t = ev.get("type")
             if t == "meta":
@@ -142,6 +166,10 @@ class Session:
                 )
             elif t == "round":
                 rounds.append(ev)
+            elif t == "usage":
+                iterations.append(ev)
+            elif t == "tool":
+                tools.append(ev)
         last = rounds[-1] if rounds else {}
         return cls(
             id=str(meta.get("id", "")),
@@ -153,6 +181,8 @@ class Session:
             provider=str(meta.get("provider", "")),
             messages=messages,
             rounds=rounds,
+            iterations=iterations,
+            tools=tools,
             system_prompt=str(last.get("system_prompt", "")),
             system_prompt_hash=str(last.get("system_prompt_hash", "")),
             usage_total=dict(last.get("usage_total") or {}),
@@ -172,6 +202,8 @@ class Session:
             "provider": self.provider,
             "messages": self.messages,
             "rounds": self.rounds,
+            "iterations": self.iterations,
+            "tools": self.tools,
             "system_prompt": self.system_prompt,
             "system_prompt_hash": self.system_prompt_hash,
             "usage_total": self.usage_total,
@@ -329,15 +361,19 @@ class SessionManager:
         provider: str = "",
         interrupted: bool = False,
         error: str | None = None,
+        usages: list[dict[str, Any]] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        elapsed_ms: int | None = None,
     ) -> Session:
-        """Append new messages + one round event for the active session.
+        """Append new messages + per-call usage/tool events + one round event
+        for the active session.
 
-        No-op when there is nothing new (no messages, no interrupted/error
-        state). The round event records the full system prompt in effect for
-        this turn, so the file keeps one system prompt per round. A failed
-        write marks the session dirty; the next save reconciles the append
-        cursor against disk before retrying, so messages are never silently
-        dropped or duplicated."""
+        No-op when there is nothing new (no messages, no calls, no
+        interrupted/error state). The round event records the full system
+        prompt in effect for this turn, so the file keeps one system prompt
+        per round. A failed write marks the session dirty; the next save
+        reconciles the append cursor against disk before retrying, so
+        messages are never silently dropped or duplicated."""
         if self._active is None:
             self._active = Session.new(
                 self._workdir, model=model or self._model, provider=provider or self._provider
@@ -352,9 +388,12 @@ class SessionManager:
             self._written = self._sync_written()
 
         new_msgs = messages[self._written :]
-        if not new_msgs and not interrupted and error is None:
+        usages = list(usages or [])
+        tools = list(tools or [])
+        if not new_msgs and not interrupted and error is None and not usages and not tools:
             return s  # nothing new to record
 
+        round_no = len(s.rounds) + 1
         events: list[dict[str, Any]] = []
         if not s.rounds:
             events.append(
@@ -371,20 +410,28 @@ class SessionManager:
             )
         for msg in new_msgs:
             events.append({"type": "message", **msg})
+        usage_events = [{"type": "usage", "round": round_no, **u} for u in usages]
+        tool_events = [{"type": "tool", "round": round_no, **t} for t in tools]
+        events.extend(usage_events)
+        events.extend(tool_events)
 
         now = datetime.now().isoformat()
         title = s.title or _extract_title(messages)
         round_ev = {
             "type": "round",
-            "round": len(s.rounds) + 1,
+            "round": round_no,
             "updated_at": now,
             "title": title,
             "message_count": len(messages),
             "usage_total": dict(usage_total or {}),
+            "usage": _sum_usages(usages),
             "tool_calls": dict(tool_stats or {}),
             "tool_failures": dict(tool_failures or {}),
             "interrupted": bool(interrupted),
             "error": error,
+            "model": model,
+            "iterations": len(usages),
+            "elapsed_ms": elapsed_ms,
             "system_prompt": system_prompt,
             "system_prompt_hash": _hash_text(system_prompt) if system_prompt else "",
         }
@@ -400,6 +447,8 @@ class SessionManager:
 
         s.messages = list(messages)
         s.rounds.append(round_ev)
+        s.iterations.extend(usage_events)
+        s.tools.extend(tool_events)
         s.updated_at = now
         s.title = title
         s.system_prompt = system_prompt

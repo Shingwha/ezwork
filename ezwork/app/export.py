@@ -31,8 +31,8 @@ def _rounds_table(session) -> str:
     """Per-round summary table (usage, tools, outcome) for the Markdown export."""
     if not session.rounds:
         return ""
-    rows = ["| round | time | msgs | tokens (P/C) | tool calls | failures | outcome |",
-            "| ----- | ---- | ---- | ------------ | ---------- | -------- | -------- |"]
+    rows = ["| round | time | msgs | tokens (P/C) | tool calls | failures | iters | elapsed | outcome |",
+            "| ----- | ---- | ---- | ------------ | ---------- | -------- | ----- | ------- | -------- |"]
     for r in session.rounds:
         usage = r.get("usage_total") or {}
         calls = ", ".join(f"{k}×{v}" for k, v in (r.get("tool_calls") or {}).items()) or "-"
@@ -43,10 +43,44 @@ def _rounds_table(session) -> str:
             outcome = "interrupted"
         else:
             outcome = "ok"
+        elapsed = r.get("elapsed_ms")
         rows.append(
             f"| {r.get('round', '?')} | {str(r.get('updated_at', ''))[:16]} "
             f"| {r.get('message_count', '?')} | {usage.get('prompt_tokens', '?')}/{usage.get('completion_tokens', '?')} "
-            f"| {calls} | {fails} | {outcome} |"
+            f"| {calls} | {fails} | {r.get('iterations', '?')} "
+            f"| {f'{elapsed}ms' if elapsed is not None else '-'} | {outcome} |"
+        )
+    return "\n".join(rows)
+
+
+def _iterations_table(session) -> str:
+    """Per-LLM-call usage table (each row = one assistant message's call)."""
+    if not session.iterations:
+        return ""
+    rows = ["| round | iter | ts | prompt | completion | cache hit | cache miss |",
+            "| ----- | ---- | --- | ------ | ---------- | --------- | ---------- |"]
+    for u in session.iterations:
+        usage = u.get("usage") or {}
+        rows.append(
+            f"| {u.get('round', '?')} | {u.get('iteration', '?')} | {str(u.get('ts', ''))[11:19]} "
+            f"| {usage.get('prompt_tokens', '-')} | {usage.get('completion_tokens', '-')} "
+            f"| {usage.get('prompt_cache_hit_tokens', '-')} | {usage.get('prompt_cache_miss_tokens', '-')} |"
+        )
+    return "\n".join(rows)
+
+
+def _tools_table(session) -> str:
+    """Per-tool-call table (no arguments — secret-safe)."""
+    if not session.tools:
+        return ""
+    rows = ["| round | tool | ok | ms | ts |",
+            "| ----- | ---- | -- | -- | -- |"]
+    for t in session.tools:
+        elapsed = t.get("elapsed_ms")
+        rows.append(
+            f"| {t.get('round', '?')} | {t.get('name', '?')} "
+            f"| {'yes' if t.get('ok') else 'no'} "
+            f"| {f'{elapsed}ms' if elapsed is not None else '-'} | {str(t.get('ts', ''))[11:19]} |"
         )
     return "\n".join(rows)
 
@@ -66,6 +100,8 @@ def render_session_md(session, system_prompt: str = "") -> str:
         f"provider: {session.provider}",
         f"messages: {len(session.messages)}",
         f"rounds: {len(session.rounds)}",
+        f"llm calls: {len(session.iterations)}",
+        f"tool calls: {len(session.tools)}",
         f"tokens: {tok}",
         f"tool calls: {tools}",
         "---",
@@ -77,6 +113,14 @@ def render_session_md(session, system_prompt: str = "") -> str:
     table = _rounds_table(session)
     if table:
         lines += ["## Per-round summary", "", table, ""]
+
+    iters = _iterations_table(session)
+    if iters:
+        lines += ["## Per-call usage", "", iters, ""]
+
+    tools = _tools_table(session)
+    if tools:
+        lines += ["## Tool calls", "", tools, ""]
 
     for msg in session.messages:
         role = msg.get("role")
