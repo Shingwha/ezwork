@@ -27,8 +27,35 @@ def _content_text(content) -> str:
     return str(content)
 
 
+def _rounds_table(session) -> str:
+    """Per-round summary table (usage, tools, outcome) for the Markdown export."""
+    if not session.rounds:
+        return ""
+    rows = ["| round | time | msgs | tokens (P/C) | tool calls | failures | outcome |",
+            "| ----- | ---- | ---- | ------------ | ---------- | -------- | -------- |"]
+    for r in session.rounds:
+        usage = r.get("usage_total") or {}
+        calls = ", ".join(f"{k}×{v}" for k, v in (r.get("tool_calls") or {}).items()) or "-"
+        fails = ", ".join(f"{k}×{v}" for k, v in (r.get("tool_failures") or {}).items()) or "-"
+        if r.get("error"):
+            outcome = f"error: {r['error'][:60]}"
+        elif r.get("interrupted"):
+            outcome = "interrupted"
+        else:
+            outcome = "ok"
+        rows.append(
+            f"| {r.get('round', '?')} | {str(r.get('updated_at', ''))[:16]} "
+            f"| {r.get('message_count', '?')} | {usage.get('prompt_tokens', '?')}/{usage.get('completion_tokens', '?')} "
+            f"| {calls} | {fails} | {outcome} |"
+        )
+    return "\n".join(rows)
+
+
 def render_session_md(session, system_prompt: str = "") -> str:
     """Render a session as Markdown with YAML frontmatter."""
+    u = session.usage_total
+    tok = f"{u.get('prompt_tokens', '?')} prompt / {u.get('completion_tokens', '?')} completion"
+    tools = ", ".join(f"{k}×{v}" for k, v in session.tool_stats.items()) or "-"
     lines = [
         "---",
         f"id: {session.id}",
@@ -38,11 +65,18 @@ def render_session_md(session, system_prompt: str = "") -> str:
         f"model: {session.model}",
         f"provider: {session.provider}",
         f"messages: {len(session.messages)}",
+        f"rounds: {len(session.rounds)}",
+        f"tokens: {tok}",
+        f"tool calls: {tools}",
         "---",
         "",
     ]
     if system_prompt:
         lines += ["## System prompt", "", "```text", system_prompt, "```", ""]
+
+    table = _rounds_table(session)
+    if table:
+        lines += ["## Per-round summary", "", table, ""]
 
     for msg in session.messages:
         role = msg.get("role")
@@ -94,7 +128,10 @@ def export_session(
     if fmt == "md":
         p.write_text(render_session_md(session, system_prompt), encoding="utf-8")
     else:
-        write_json(p, {"system_prompt": system_prompt, **session.to_dict()})
+        data = session.to_dict()
+        if system_prompt:  # override the latest-round prompt for the export
+            data["system_prompt"] = system_prompt
+        write_json(p, data)
     return p
 
 

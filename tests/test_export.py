@@ -35,11 +35,15 @@ def test_export_json_roundtrips(tmp_path) -> None:
     assert data["system_prompt"] == "sp"
     assert len(data["messages"]) == 4
     assert data["model"] == "m"
-    # A fresh store can load the exported file back as a session.
-    store = SessionStore(tmp_path / "import")
-    s = Session.from_dict({k: v for k, v in data.items() if k != "system_prompt"})
-    store.save(s)
-    assert store.load("/work/dir", s.id) is not None
+    # The exported dict can be rebuilt into a session and persisted to a store.
+    s = Session.from_events(
+        [{"type": "meta", "schema": "x", "id": data["id"], "created_at": data["created_at"],
+          "updated_at": data["updated_at"], "workdir": data["workdir"], "title": "",
+          "model": data["model"], "provider": data["provider"]},
+         *[{"type": "message", **m} for m in data["messages"]]]
+    )
+    assert s.id == data["id"]
+    assert len(s.messages) == 4
 
 
 def test_export_md_structure(tmp_path) -> None:

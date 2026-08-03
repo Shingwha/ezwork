@@ -63,6 +63,7 @@ def build_agent(
     model_override: str | None = None,
     on_error: Callable[[str], None] | None = None,
     renderer: Display | None = None,
+    on_tool_event: Callable[[object], None] | None = None,
 ) -> Agent:
     """Build a fully-wired AgentLoop.
 
@@ -72,6 +73,9 @@ def build_agent(
                     run; the caller prints the final answer afterwards)
     on_error    -> optional callback invoked once per provider ErrorEvent.
                     Oneshot uses this to surface LLM failures on stderr.
+    on_tool_event -> optional callback invoked for every tool_start /
+                    tool_complete event (used by the CLI to tally tool
+                    call/failure stats into the session log).
     """
     provider = config.build_provider()
     if model_override:
@@ -91,6 +95,8 @@ def build_agent(
     )
     if render:
         cfg.emit.append(renderer or Display())
+    if on_tool_event is not None:
+        cfg.emit.append(on_tool_event)
     if on_error is not None:
         cfg.emit.append(
             lambda e: on_error(e.error)
@@ -156,6 +162,13 @@ class CLIApp:
         self.agent = self._build_agent()
         self._resume_id = resume_id
 
+        # Per-turn accounting, persisted into the session log on save:
+        # cumulative tool call/failure tallies + the latest turn's outcome.
+        self._tool_stats: dict[str, int] = {}
+        self._tool_failures: dict[str, int] = {}
+        self._turn_interrupted = False
+        self._turn_error: str | None = None
+
     # ── agent construction ──
 
     def _build_agent(self) -> Agent:
@@ -165,7 +178,32 @@ class CLIApp:
             model_override=self.model_override,
             on_error=None if self.interactive else self.errors.append,
             renderer=self.display,
+            on_tool_event=self._on_tool_event,
         )
+
+    def _on_tool_event(self, e: object) -> None:
+        """Tally tool calls/failures from the agent's event stream.
+
+        A tool result is a failure when its content carries the `[error`
+        prefix the kernel uses for ToolError / vetoed calls."""
+        if e.type == "tool_start":
+            name = (e.tool_call or {}).get("function", {}).get("name", "?")
+            self._tool_stats[name] = self._tool_stats.get(name, 0) + 1
+        elif e.type == "tool_complete":
+            name = (e.tool_call or {}).get("function", {}).get("name", "?")
+            content = (e.tool_result or {}).get("content", "")
+            if isinstance(content, str) and content.startswith("[error"):
+                self._tool_failures[name] = self._tool_failures.get(name, 0) + 1
+
+    def _usage_dict(self) -> dict[str, int]:
+        """Agent cumulative usage as a flat dict (cache fields when present)."""
+        u = self.agent.total_usage
+        d = {"prompt_tokens": u.prompt_tokens, "completion_tokens": u.completion_tokens}
+        if u.prompt_cache_hit_tokens is not None:
+            d["prompt_cache_hit_tokens"] = u.prompt_cache_hit_tokens
+        if u.prompt_cache_miss_tokens is not None:
+            d["prompt_cache_miss_tokens"] = u.prompt_cache_miss_tokens
+        return d
 
     # ── session lifecycle ──
 
@@ -174,20 +212,37 @@ class CLIApp:
 
         Sync by design: called both from the async REPL loop and from the
         sync KeyboardInterrupt path of run(), where awaiting is impossible.
-        The write happens between turns — a few ms of JSON I/O is fine."""
+        The write appends only the new messages + one round event — a few ms
+        of I/O is fine."""
         if not self.agent.messages:
             return
         self.session_mgr.save(
             self.agent.messages,
+            usage_total=self._usage_dict(),
+            tool_stats=self._tool_stats,
+            tool_failures=self._tool_failures,
+            system_prompt=self.agent.system_prompt,
             model=self.config.model,
             provider=self.config.provider,
+            interrupted=self._turn_interrupted,
+            error=self._turn_error,
         )
+        self._turn_interrupted = False
+        self._turn_error = None
+
+    def _apply_resumed(self, session: Session) -> None:
+        """Load a session's messages into the agent and adopt its system
+        prompt (the one from its latest round) so provider prefix caching
+        keeps working across resumes."""
+        self.agent.messages = list(session.messages)
+        if session.system_prompt:
+            self.agent.system_prompt = session.system_prompt
 
     def resume_session(self, session: Session) -> None:
         """Resume an existing session — preserves its identity."""
         self._save_current_session()
         self.session_mgr.switch_to(session)
-        self.agent.messages = list(session.messages)
+        self._apply_resumed(session)
         if self.display is not None:
             self.display.info(
                 f"(resumed session {session.id}: {session.title or 'untitled'})"
@@ -196,9 +251,24 @@ class CLIApp:
             self.display.render_messages(session.messages)
 
     def clear_conversation(self) -> None:
-        """Save and clear the current conversation."""
+        """Save and clear the current conversation.
+
+        A fresh session rebuilds the system prompt from current sources
+        (AGENTS.md, skills, …) — the new session must not inherit the
+        previous one's cached prompt."""
         self._save_current_session()
         self.agent.reset()
+        self.agent.system_prompt = build_system_prompt(
+            cwd=_cwd(),
+            home=HOME,
+            config_path=str(DEFAULT_CONFIG_PATH),
+            sessions_dir=SESSIONS_DIR,
+            skills_dirs=_skills_dirs(_cwd()),
+        )
+        self._tool_stats.clear()
+        self._tool_failures.clear()
+        self._turn_interrupted = False
+        self._turn_error = None
         self.session_mgr.clear()
 
     # ── dispatch ──
@@ -248,8 +318,10 @@ class CLIApp:
         try:
             await task
         except asyncio.CancelledError:
+            self._turn_interrupted = True
             self.display.info("(interrupted)")
         except Exception as e:
+            self._turn_error = str(e)
             self.display.error(f"[error] {e}")
         finally:
             signal.signal(signal.SIGINT, original)
@@ -272,7 +344,7 @@ class CLIApp:
                     f"session {self._resume_id} not found (cwd {_cwd()})"
                 )
                 return 1
-            self.agent.messages = list(session.messages)
+            self._apply_resumed(session)
             self.display.info(
                 f"(resumed session {session.id}: {session.title or 'untitled'})"
             )
@@ -328,15 +400,17 @@ class CLIApp:
                     file=sys.stderr,
                 )
                 return 1
-            self.agent.messages = list(session.messages)
+            self._apply_resumed(session)
 
         try:
             answer = await self.agent.chat(prompt_text)
         except asyncio.CancelledError:
+            self._turn_interrupted = True
             print("\n(interrupted)", file=sys.stderr)
             await self._persist(no_session=no_session)
             return 130
         except Exception as e:
+            self._turn_error = str(e)
             print(f"[error] {e}", file=sys.stderr)
             await self._persist(no_session=no_session)
             return 1
@@ -351,6 +425,7 @@ class CLIApp:
             # no renderer is attached in oneshot mode, so surface the error
             # here and exit non-zero — a script must not mistake this for a
             # real answer.
+            self._turn_error = self.errors[0]
             print(f"[provider error] {self.errors[0]}", file=sys.stderr)
             await self._persist(no_session=no_session)
             return 1
@@ -368,20 +443,26 @@ class CLIApp:
     async def _persist(self, *, no_session: bool = False) -> None:
         """Save the active session if there is anything to save. Never raises.
 
-        The write runs in a worker thread: a long history (large tool outputs)
-        can be megabytes of JSON, and saving synchronously would stall the
-        loop before the next prompt."""
+        The write is an incremental append of new messages + one round event
+        (a few KB at most), so it runs inline without stalling the loop."""
         if no_session or not self.agent.messages:
             return
         try:
-            await asyncio.to_thread(
-                self.session_mgr.save,
+            self.session_mgr.save(
                 self.agent.messages,
+                usage_total=self._usage_dict(),
+                tool_stats=self._tool_stats,
+                tool_failures=self._tool_failures,
+                system_prompt=self.agent.system_prompt,
                 model=self.config.model,
                 provider=self.config.provider,
+                interrupted=self._turn_interrupted,
+                error=self._turn_error,
             )
         except Exception:
             pass
+        self._turn_interrupted = False
+        self._turn_error = None
 
 
 __all__ = ["CLIApp", "build_agent", "_build_tools"]

@@ -111,11 +111,16 @@ def test_oneshot_interrupt_returns_130(tmp_path, capsys) -> None:
 def test_oneshot_resume_loads_history(tmp_path, capsys) -> None:
     store = SessionStore(tmp_path / "sessions")
     s = Session.new(str(Path.cwd()), model="m", provider="p")
-    s.messages = [
-        {"role": "user", "content": "first"},
-        {"role": "assistant", "content": "first answer"},
-    ]
-    store.save(s)
+    store.append(s.workdir, s.id, [
+        {"type": "meta", "schema": "ezwork.session.v1", "id": s.id,
+         "created_at": s.created_at, "workdir": s.workdir, "title": "",
+         "model": s.model, "provider": s.provider},
+        {"type": "message", "role": "user", "content": "first"},
+        {"type": "message", "role": "assistant", "content": "first answer"},
+        {"type": "round", "round": 1, "updated_at": s.updated_at, "title": "",
+         "message_count": 2, "usage_total": {}, "tool_calls": {}, "tool_failures": {},
+         "interrupted": False, "error": None, "system_prompt": "", "system_prompt_hash": ""},
+    ])
 
     provider = MockProvider(["second answer"])
     app = _make_app(provider, tmp_path, interactive=False)
