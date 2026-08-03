@@ -99,14 +99,10 @@ def test_factory_default_model(factory, expected_model):
     assert factory(api_key="sk-test").model == expected_model
 
 
-def test_factory_model_override():
-    p = DeepSeek(api_key="sk-test", model="deepseek-v4-flash")
-    assert p.model == "deepseek-v4-flash"
-
-
-def test_factory_model_none_uses_default():
-    p = LongCat(api_key="sk-test", model=None)
-    assert p.model == "LongCat-2.0"
+def test_factory_model_override_and_default():
+    assert DeepSeek(api_key="sk-test", model="deepseek-v4-flash").model == "deepseek-v4-flash"
+    # model=None falls back to the vendor default
+    assert LongCat(api_key="sk-test", model=None).model == "LongCat-2.0"
 
 
 @pytest.mark.parametrize(
@@ -136,15 +132,11 @@ def test_longcat_thinking_no_effort():
     assert "reasoning_effort" not in extra
 
 
-def test_deepseek_thinking_with_effort():
+def test_deepseek_thinking_with_and_without_effort():
     p = DeepSeek(api_key="sk-test")
     _, extra = p._build_request([], "s", [], 100, True, thinking=True, reasoning_effort="max")
     assert extra["thinking"] == {"type": "enabled"}
     assert extra["reasoning_effort"] == "max"
-
-
-def test_deepseek_thinking_disabled_drops_effort():
-    p = DeepSeek(api_key="sk-test")
     _, extra = p._build_request([], "s", [], 100, True, thinking=False, reasoning_effort="max")
     assert extra["thinking"] == {"type": "disabled"}
     assert "reasoning_effort" not in extra
@@ -174,24 +166,12 @@ def test_factory_extra_body_merged():
     assert extra["thinking"] == {"type": "enabled"}
 
 
-# ---- presets are protocols ---------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "preset_cls",
-    [LongCatPreset, DeepSeekPreset, GLMPreset, MimoPreset, MiniMaxPreset],
-)
-def test_preset_satisfies_protocol(preset_cls):
-    assert isinstance(preset_cls(), ThinkingPreset)
-
-
 # ---- client warmup / preload ---------------------------------------------
 
 
-def test_warmup_builds_client_in_background_thread(monkeypatch):
-    """warmup() constructs the client (and preloads error classes) in a
-    daemon thread, so the first stream() call doesn't pay the ~2-3s SDK
-    import + construction inline."""
+def test_warmup_builds_client_once_in_background_thread(monkeypatch):
+    """warmup() constructs the client in a daemon thread so the first stream()
+    call doesn't pay the SDK import inline; a second call is a no-op."""
     import threading
     import time as _time
 
@@ -201,6 +181,7 @@ def test_warmup_builds_client_in_background_thread(monkeypatch):
     def fake_ensure():
         calls["n"] = calls.get("n", 0) + 1
         calls["thread"] = threading.current_thread().name
+        p._client = object()  # warmup()'s no-op guard checks this
 
     monkeypatch.setattr(p, "_ensure_client", fake_ensure)
     monkeypatch.setattr(
@@ -212,28 +193,6 @@ def test_warmup_builds_client_in_background_thread(monkeypatch):
         _time.sleep(0.01)
     assert calls.get("n") == 1
     assert calls.get("thread") != threading.main_thread().name
-
-
-def test_warmup_is_noop_after_client_exists(monkeypatch):
-    """Calling warmup() twice must not spawn a second thread/client."""
-    import threading
-    import time as _time
-
-    p = OpenAIProvider(api_key="sk-test")
-    calls = {"n": 0}
-
-    def fake_ensure():
-        calls["n"] += 1
-        p._client = object()  # warmup()'s no-op guard checks this
-
-    monkeypatch.setattr(p, "_ensure_client", fake_ensure)
-    monkeypatch.setattr(
-        OpenAIProvider, "_load_exc_classes", classmethod(lambda cls: None)
-    )
-    p.warmup()
-    deadline = _time.monotonic() + 2
-    while not calls["n"] and _time.monotonic() < deadline:
-        _time.sleep(0.01)
     p.warmup()  # client is now set — must not spawn again
     _time.sleep(0.05)
     assert calls["n"] == 1

@@ -1,3 +1,6 @@
+"""Message helper tests — one test per helper family (wire shapes are the
+public contract; details like role/content/tool_calls are asserted together)."""
+
 from ezwork.core.message import (
     assistant_text,
     assistant_with_tool_calls,
@@ -9,16 +12,18 @@ from ezwork.core.message import (
 )
 
 
-def test_user_text():
-    m = user_text("hello")
-    assert m == {"role": "user", "content": "hello"}
-
-
-def test_assistant_text():
+def test_text_helpers():
+    assert user_text("hello") == {"role": "user", "content": "hello"}
     assert assistant_text("hi") == {"role": "assistant", "content": "hi"}
+    # get_text resolves string content, part lists, and missing content.
+    assert get_text({"role": "user", "content": "hi"}) == "hi"
+    parts = {"role": "user", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}
+    assert get_text(parts) == "ab"
+    assert get_text({"role": "assistant"}) == ""
 
 
-def test_assistant_with_tool_calls_normalises_compact_form():
+def test_assistant_with_tool_calls_forms():
+    # Compact form is normalised to the full wire shape.
     m = assistant_with_tool_calls(
         content="thinking",
         tool_calls=[{"id": "c1", "name": "foo", "arguments": '{"x": 1}'}],
@@ -28,71 +33,32 @@ def test_assistant_with_tool_calls_normalises_compact_form():
     assert m["tool_calls"] == [
         {"id": "c1", "type": "function", "function": {"name": "foo", "arguments": '{"x": 1}'}}
     ]
-
-
-def test_assistant_with_tool_calls_passes_full_form_through():
-    full = {
-        "id": "c1",
-        "type": "function",
-        "function": {"name": "foo", "arguments": "{}"},
-    }
-    m = assistant_with_tool_calls(content=None, tool_calls=[full])
-    assert m["tool_calls"] == [full]
-
-
-def test_assistant_with_tool_calls_reasoning():
+    # Full form passes through untouched; reasoning_content is preserved.
+    full = {"id": "c2", "type": "function", "function": {"name": "bar", "arguments": "{}"}}
     m = assistant_with_tool_calls(
-        content="x", tool_calls=[{"id": "c1", "name": "t", "arguments": "{}"}],
-        reasoning_content="why",
+        content=None, tool_calls=[full], reasoning_content="why"
     )
+    assert m["tool_calls"] == [full]
     assert m["reasoning_content"] == "why"
 
 
-def test_tool_result_plain():
-    m = tool_result("abc", "42")
-    assert m == {"role": "tool", "tool_call_id": "abc", "content": "42"}
-
-
-def test_tool_result_error_prefix():
-    m = tool_result("abc", "boom", is_error=True)
-    assert m["content"] == "[error] boom"
-
-
-def test_tool_result_no_double_error_prefix():
-    m = tool_result("abc", "[error] already", is_error=True)
-    assert m["content"] == "[error] already"
+def test_tool_result_forms():
+    assert tool_result("abc", "42") == {"role": "tool", "tool_call_id": "abc", "content": "42"}
+    assert tool_result("abc", "boom", is_error=True)["content"] == "[error] boom"
+    # An already-prefixed error is never double-prefixed.
+    assert tool_result("abc", "[error] already", is_error=True)["content"] == "[error] already"
 
 
 def test_user_with_images():
     m = user_with_images("look", [{"url": "data:image/png;base64,xxx"}])
     assert m["role"] == "user"
-    assert isinstance(m["content"], list)
     assert m["content"][0]["type"] == "image_url"
     assert m["content"][1] == {"type": "text", "text": "look"}
-
-
-def test_user_with_images_empty_falls_back_to_text():
-    m = user_with_images("just text", [])
-    assert m == {"role": "user", "content": "just text"}
-
-
-def test_get_text_string():
-    assert get_text({"role": "user", "content": "hi"}) == "hi"
-
-
-def test_get_text_parts():
-    m = {"role": "user", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}
-    assert get_text(m) == "ab"
-
-
-def test_get_text_missing():
-    assert get_text({"role": "assistant"}) == ""
+    # No images → plain text content.
+    assert user_with_images("just text", []) == {"role": "user", "content": "just text"}
 
 
 def test_get_tool_calls():
     tcs = [{"id": "c1", "type": "function", "function": {"name": "x", "arguments": "{}"}}]
     assert get_tool_calls({"role": "assistant", "tool_calls": tcs}) == tcs
-
-
-def test_get_tool_calls_empty():
     assert get_tool_calls({"role": "user", "content": "x"}) == []

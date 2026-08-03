@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-import pytest
 
 from ezwork.app.cli.app import CLIApp
 from ezwork.app.config import Config
@@ -16,7 +15,6 @@ from tests import MockProvider
 
 def _make_app(provider, tmp_path, **kwargs) -> CLIApp:
     """CLIApp with a scripted provider and an isolated sessions dir."""
-    import ezwork.app.session as session_mod
 
     def _patch(_self) -> MockProvider:
         return provider

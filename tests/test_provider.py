@@ -1,10 +1,8 @@
 """Provider-side tests: collect_stream accumulation + StreamChunk helpers."""
 
-import json
 
-import pytest
 
-from ezwork.core.provider import Response, StreamChunk, Usage, collect_stream
+from ezwork.core.provider import StreamChunk, Usage, collect_stream
 
 
 async def _aiter(chunks):

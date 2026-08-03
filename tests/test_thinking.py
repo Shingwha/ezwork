@@ -9,8 +9,6 @@ fields must go through extra_body, because the typed openai SDK rejects
 unknown kwargs like `thinking`, `reasoning_split`, etc.
 """
 
-from dataclasses import dataclass, field
-from typing import Any
 
 from ezwork.core.provider import ThinkingParams
 from ezwork.providers.openai import OpenAIProvider
@@ -64,13 +62,22 @@ def _provider_with(preset) -> OpenAIProvider:
 
 
 def test_kwargs_never_contain_vendor_fields():
-    """The SDK-typed kwargs must never carry vendor-specific keys."""
+    """Vendor-specific keys must live in extra_body, never in SDK-typed kwargs
+    (the typed openai SDK rejects unknown kwargs)."""
     p = _provider_with(_DeepSeekStylePreset())
     kwargs, extra_body = p._build_request(
-        [], "sys", [], 100, True, thinking=True, reasoning_effort="high"
+        [], "sys", [{"type": "function", "function": {"name": "t"}}], 100,
+        stream=True, thinking=True, reasoning_effort="high",
     )
     for forbidden in ("thinking", "reasoning_effort", "reasoning_split"):
         assert forbidden not in kwargs, f"{forbidden} leaked into SDK kwargs"
+    # only these keys are valid openai SDK kwargs
+    assert set(kwargs.keys()) <= {
+        "model", "messages", "max_tokens", "stream", "tools", "stream_options",
+        "tool_choice", "temperature", "top_p", "n", "presence_penalty",
+        "frequency_penalty", "user", "seed", "stop", "response_format",
+        "logit_bias", "logprobs", "top_logprobs", "service_tier",
+    }
 
 
 def test_no_preset_no_thinking_fields_anywhere():
@@ -92,17 +99,14 @@ def test_no_thinking_arg_preset_not_consulted():
     assert "reasoning_effort" not in extra_body
 
 
-def test_deepseek_style_enabled_with_effort():
+def test_deepseek_style_enabled_disabled_and_existing_body():
     p = _provider_with(_DeepSeekStylePreset())
     kwargs, extra_body = p._build_request(
         [], "sys", [], 100, False, thinking=True, reasoning_effort="max"
     )
     assert extra_body["thinking"] == {"type": "enabled"}
     assert extra_body["reasoning_effort"] == "max"
-
-
-def test_deepseek_style_disabled_drops_effort():
-    p = _provider_with(_DeepSeekStylePreset())
+    assert extra_body["existing"] == 1  # pre-existing extra_body preserved
     kwargs, extra_body = p._build_request(
         [], "sys", [], 100, False, thinking=False, reasoning_effort="max"
     )
@@ -119,39 +123,12 @@ def test_minimax_style_merges_body():
     assert extra_body["reasoning_split"] is True
 
 
-def test_existing_extra_body_preserved():
-    p = _provider_with(_DeepSeekStylePreset())
-    kwargs, extra_body = p._build_request(
-        [], "sys", [], 100, False, thinking=True, reasoning_effort="high"
-    )
-    assert extra_body["existing"] == 1
-    assert extra_body["thinking"] == {"type": "enabled"}
+def test_presets_satisfy_protocol_and_return_params():
+    from ezwork.core.provider import ThinkingPreset
 
-
-def test_kwargs_carry_sdk_standard_fields_only():
-    p = _provider_with(_DeepSeekStylePreset())
-    kwargs, extra_body = p._build_request(
-        [], "sys", [{"type": "function", "function": {"name": "t"}}], 100,
-        stream=True, thinking=True, reasoning_effort="high",
-    )
-    # only these keys are valid openai SDK kwargs
-    assert set(kwargs.keys()) <= {
-        "model", "messages", "max_tokens", "stream", "tools", "stream_options",
-        "tool_choice", "temperature", "top_p", "n", "presence_penalty",
-        "frequency_penalty", "user", "seed", "stop", "response_format",
-        "logit_bias", "logprobs", "top_logprobs", "service_tier",
-    }
-
-
-def test_preset_returned_as_thinking_params_type():
     tp = _DeepSeekStylePreset().build_params(True, "high")
     assert isinstance(tp, ThinkingParams)
     assert tp.body == {"thinking": {"type": "enabled"}}
     assert tp.top_params == {"reasoning_effort": "high"}
-
-
-def test_preset_satisfies_protocol():
-    from ezwork.core.provider import ThinkingPreset
-
     assert isinstance(_DeepSeekStylePreset(), ThinkingPreset)
     assert isinstance(_MiniMaxStylePreset(), ThinkingPreset)

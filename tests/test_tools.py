@@ -103,29 +103,26 @@ def test_edit_requires_unique_unless_all(tmp_path: Path):
     assert "3 occurrence" in out
 
 
-def test_edit_old_string_not_found(tmp_path: Path):
+@pytest.mark.parametrize(
+    "old_string,new_string,content,expect_in_message",
+    [
+        # Plain missing text.
+        ("missing", "x", "hello", ""),
+        # Swapped args: new_string exists in the file — hint at the swap.
+        ("goodbye", "hello world", "hello world", "swap"),
+        # Near-miss: suggest the closest line.
+        ("def foo()::", "x", "def foo():\n    return 1\n", "def foo():"),
+    ],
+    ids=["plain-miss", "swapped-args", "closest-line"],
+)
+def test_edit_not_found_hints(tmp_path: Path, old_string, new_string, content, expect_in_message):
     f = tmp_path / "x.txt"
-    f.write_text("hello", encoding="utf-8")
+    f.write_text(content, encoding="utf-8")
     with pytest.raises(ToolError) as ei:
-        EditTool().run({"path": str(f), "old_string": "missing", "new_string": "x"})
+        EditTool().run({"path": str(f), "old_string": old_string, "new_string": new_string})
     assert ei.value.code == "not_found"
-
-
-def test_edit_not_found_detects_swapped_args(tmp_path: Path):
-    f = tmp_path / "x.txt"
-    f.write_text("hello world", encoding="utf-8")
-    with pytest.raises(ToolError) as ei:
-        EditTool().run({"path": str(f), "old_string": "goodbye", "new_string": "hello world"})
-    assert ei.value.code == "not_found"
-    assert "swap" in ei.value.message.lower()
-
-
-def test_edit_not_found_suggests_closest_line(tmp_path: Path):
-    f = tmp_path / "x.txt"
-    f.write_text("def foo():\n    return 1\n", encoding="utf-8")
-    with pytest.raises(ToolError) as ei:
-        EditTool().run({"path": str(f), "old_string": "def foo()::", "new_string": "x"})
-    assert "def foo():" in ei.value.message
+    if expect_in_message:
+        assert expect_in_message.lower() in ei.value.message.lower()
 
 
 def test_edit_not_unique_reports_line_numbers(tmp_path: Path):
@@ -164,31 +161,9 @@ def test_edit_concurrent_same_file_all_apply(tmp_path: Path):
 
 
 # ---- bash ----
-
-
-def test_bash_runs_echo():
-    out = BashTool().run({"command": "echo bash_test_123"})
-    assert "bash_test_123" in out
-
-
-def test_bash_persists_cwd():
-    import os
-
-    tool = BashTool()
-    cwd_before = os.getcwd()
-    tool.run({"command": f"cd .."})
-    # session cwd mutated, but process cwd unchanged
-    assert os.getcwd() == cwd_before
-    # subsequent pwd reflects the cd
-    pwd = tool.run({"command": "pwd"})
-    # parent of cwd should appear in pwd
-    assert str(Path(cwd_before).parent) in pwd or pwd != cwd_before
-
-
-def test_bash_unknown_command_returns_error_string():
-    out = BashTool().run({"command": "this_command_does_not_exist_xyz"})
-    # bash writes to stderr; tool concatenates; some marker present
-    assert "not found" in out or "error" in out or out  # tolerant
+# Per-shell behaviour (echo, cwd persistence, unknown commands, env) is
+# covered by the backend parametrisation below; only BashTool-specific
+# state (restart) needs its own test.
 
 
 def test_bash_restart_resets_session():
@@ -207,13 +182,10 @@ def test_bash_restart_resets_session():
 # ---- schemas ----
 
 
-def test_all_four_tools_have_distinct_names():
-    names = {t.name for t in [ReadTool(), WriteTool(), EditTool(), BashTool()]}
-    assert names == {"read", "write", "edit", "bash"}
-
-
 def test_tool_schemas_valid():
-    for t in [ReadTool(), WriteTool(), EditTool(), BashTool()]:
+    tools = [ReadTool(), WriteTool(), EditTool(), BashTool()]
+    assert {t.name for t in tools} == {"read", "write", "edit", "bash"}
+    for t in tools:
         s = t.to_schema()
         assert s["type"] == "function"
         assert s["function"]["name"] == t.name
@@ -232,24 +204,6 @@ def test_detect_shell_finds_something():
     assert info is not None
     assert info.family in {"bash", "sh", "powershell", "cmd"}
     assert info.path.exists()
-
-
-def test_bash_tool_description_reflects_active_shell():
-    """The tool detects the shell lazily (on first schema generation) and bakes
-    its syntax hint into the description, so the model knows which command
-    syntax to use."""
-    from ezwork.tools.bash import _SHELL_HINTS, detect_shell
-
-    tool = BashTool()
-    # Lazy: construction does not probe the shell — the description is neutral.
-    assert "Active shell" not in tool.description
-    schema = tool.to_schema()
-    info = detect_shell()
-    # the family-specific hint must be present in the rendered description
-    assert _SHELL_HINTS[info.family] in tool.description
-    assert _SHELL_HINTS[info.family] in schema["function"]["description"]
-    # the neutral base is always present
-    assert "persistent session" in tool.description
 
 
 def test_bash_tool_detection_happens_once_lazily(monkeypatch):

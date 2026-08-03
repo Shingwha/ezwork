@@ -1,7 +1,6 @@
 """Agent loop tests — exercises the callback-driven architecture end to end
 using MockProvider. Messages are OpenAI-format dicts."""
 
-import asyncio
 
 import pytest
 
@@ -10,15 +9,11 @@ from ezwork.core.config import LoopConfig
 from ezwork.core.event import (
     ErrorEvent,
     IterEndEvent,
-    IterStartEvent,
     ResponseEvent,
-    ToolCompleteEvent,
-    ToolStartEvent,
 )
-from ezwork.core.message import get_text, get_tool_calls
 from ezwork.core.tool import Tool, ToolError, ToolRegistry
 
-from . import MockProvider, usage
+from . import MockProvider
 
 
 def _reg(*tools: Tool) -> ToolRegistry:
@@ -84,21 +79,18 @@ async def test_chat_emits_lifecycle_events():
 # ---- thinking passthrough ----
 
 
-async def test_thinking_and_effort_passed_to_provider():
+@pytest.mark.parametrize(
+    "thinking,effort",
+    [(True, "high"), (None, None)],
+    ids=["explicit", "defaults-none"],
+)
+async def test_thinking_and_effort_passed_to_provider(thinking, effort):
     provider = MockProvider(["ok"])
-    cfg = LoopConfig(max_retries=0, thinking=True, reasoning_effort="high")
+    cfg = LoopConfig(max_retries=0, thinking=thinking, reasoning_effort=effort)
     agent = AgentLoop(provider, "sys", _reg(), cfg)
     await agent.chat("think hard")
-    assert provider.calls[0]["thinking"] is True
-    assert provider.calls[0]["reasoning_effort"] == "high"
-
-
-async def test_thinking_defaults_none():
-    provider = MockProvider(["ok"])
-    agent = AgentLoop(provider, "sys", _reg(), LoopConfig(max_retries=0))
-    await agent.chat("hi")
-    assert provider.calls[0]["thinking"] is None
-    assert provider.calls[0]["reasoning_effort"] is None
+    assert provider.calls[0]["thinking"] is thinking
+    assert provider.calls[0]["reasoning_effort"] is effort
 
 
 # ---- tool calling ----

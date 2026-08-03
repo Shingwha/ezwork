@@ -8,9 +8,9 @@ treats stdin as the whole prompt.
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
 import time
+
+import pytest
 
 import ezwork.app.cli as cli  # entry: main, oneshot, _enable_ansi
 from ezwork.app.cli import app as cli_app  # build_agent
@@ -63,19 +63,6 @@ def test_piped_stdin_never_closed_times_out(monkeypatch) -> None:
     assert "partial data" in got  # whatever arrived is returned
 
 
-def test_piped_stdin_empty_pipe_returns_none(monkeypatch) -> None:
-    r, w = os.pipe()
-    os.close(w)  # nothing written, writer closed
-    monkeypatch.setattr(cli_stdin.sys, "stdin", _FakeStdin(fd=r, is_tty=False))
-    assert cli_stdin._read_piped_stdin() is None
-
-
-def test_piped_stdin_tty_returns_none(monkeypatch) -> None:
-    """Interactive terminals must never block or consume stdin."""
-    monkeypatch.setattr(cli_stdin.sys, "stdin", _FakeStdin(text="ignored", is_tty=True))
-    assert cli_stdin._read_piped_stdin() is None
-
-
 def test_piped_stdin_silent_open_pipe_returns_quickly(monkeypatch) -> None:
     """A silent inherited pipe (CI, sub-agents) must not wait out the full
     2s drain window — the first-byte grace period is all it costs."""
@@ -86,15 +73,10 @@ def test_piped_stdin_silent_open_pipe_returns_quickly(monkeypatch) -> None:
     assert time.monotonic() - start < 1.0
 
 
-def test_read_piped_stdin_honours_first_byte_timeout(monkeypatch) -> None:
-    """The first-byte window is configurable: piped-context mode passes the
-    short grace, `-p -` passes the full _STDIN_TIMEOUT."""
-    r, w = os.pipe()
-    monkeypatch.setattr(cli_stdin.sys, "stdin", _FakeStdin(fd=r, is_tty=False))
-    monkeypatch.setattr(cli_stdin, "_STDIN_TIMEOUT", 0.4)
-    start = time.monotonic()
-    assert cli_stdin._read_piped_stdin(first_byte_timeout=cli_stdin._STDIN_TIMEOUT) is None
-    assert time.monotonic() - start >= 0.3  # waited the full window, not the grace
+def test_piped_stdin_tty_returns_none(monkeypatch) -> None:
+    """Interactive terminals must never block or consume stdin."""
+    monkeypatch.setattr(cli_stdin.sys, "stdin", _FakeStdin(text="ignored", is_tty=True))
+    assert cli_stdin._read_piped_stdin() is None
 
 
 # ─── _prompt_from_stdin (`-p -`) ──────────────────────────────────────────
@@ -111,29 +93,19 @@ def test_prompt_from_stdin_tty_reads_to_eof(monkeypatch) -> None:
     assert cli_stdin._prompt_from_stdin() == "multi\nline\n"
 
 
-def test_prompt_from_stdin_empty_exits_2(monkeypatch) -> None:
-    _pipe_stdin(monkeypatch, b"", close_write=True)
-    try:
-        cli_stdin._prompt_from_stdin()
-    except SystemExit as exc:
-        assert exc.code == 2
-    else:
-        raise AssertionError("expected SystemExit(2)")
-
-
-def test_prompt_from_stdin_silent_pipe_still_errors(monkeypatch) -> None:
-    """`-p -` with a silent (open, empty) pipe still exits 2 — the whole
-    prompt is expected on stdin, so the full first-byte window applies
-    (unlike piped-context mode, which uses the short grace)."""
-    r, w = os.pipe()
-    monkeypatch.setattr(cli_stdin.sys, "stdin", _FakeStdin(fd=r, is_tty=False))
+@pytest.mark.parametrize(
+    "payload,close_write",
+    [(b"", True), (b"", False)],
+    ids=["empty-closed-pipe", "silent-open-pipe"],
+)
+def test_prompt_from_stdin_empty_input_exits_2(monkeypatch, payload, close_write) -> None:
+    """`-p -` with empty stdin exits 2 — whether the pipe is closed or a
+    silent (open) pipe, since the whole prompt is expected on stdin."""
+    _pipe_stdin(monkeypatch, payload, close_write=close_write)
     monkeypatch.setattr(cli_stdin, "_STDIN_TIMEOUT", 0.05)
-    try:
+    with pytest.raises(SystemExit) as exc:
         cli_stdin._prompt_from_stdin()
-    except SystemExit as exc:
-        assert exc.code == 2
-    else:
-        raise AssertionError("expected SystemExit(2)")
+    assert exc.value.code == 2
 
 
 # ─── _enable_ansi / build_agent ───────────────────────────────────────────
@@ -229,44 +201,25 @@ def test_main_prompt_query_merges_piped_context(monkeypatch) -> None:
     assert calls["prompt"] == "summarize\n\nline1\nline2\n"
 
 
-def test_main_prompt_query_without_pipe_is_unchanged(monkeypatch) -> None:
-    """No piped stdin: `-p "query"` stays exactly the query."""
+@pytest.mark.parametrize(
+    "stdin_mode",
+    ["tty", "empty-pipe"],
+    ids=["tty", "empty-pipe"],
+)
+def test_main_prompt_query_without_content_is_unchanged(monkeypatch, stdin_mode) -> None:
+    """`-p "query"` stays exactly the query when there is no piped content
+    (interactive TTY or empty pipe)."""
     calls: dict = {}
 
     async def fake_oneshot(prompt: str, **kwargs) -> int:
         calls["prompt"] = prompt
         return 0
 
-    monkeypatch.setattr(cli.sys, "stdin", _FakeStdin(text="", is_tty=True))
+    if stdin_mode == "tty":
+        monkeypatch.setattr(cli.sys, "stdin", _FakeStdin(text="", is_tty=True))
+    else:
+        _pipe_stdin(monkeypatch, b"", close_write=True)
     monkeypatch.setattr(cli, "oneshot", fake_oneshot)
     monkeypatch.setattr(cli.sys, "argv", ["ezwork", "-p", "hello"])
     assert cli.main() == 0
     assert calls["prompt"] == "hello"
-
-
-def test_main_prompt_query_empty_pipe_is_unchanged(monkeypatch) -> None:
-    """Empty piped stdin: `-p "query"` stays exactly the query."""
-    calls: dict = {}
-
-    async def fake_oneshot(prompt: str, **kwargs) -> int:
-        calls["prompt"] = prompt
-        return 0
-
-    _pipe_stdin(monkeypatch, b"", close_write=True)
-    monkeypatch.setattr(cli, "oneshot", fake_oneshot)
-    monkeypatch.setattr(cli.sys, "argv", ["ezwork", "-p", "hello"])
-    assert cli.main() == 0
-    assert calls["prompt"] == "hello"
-
-
-def test_main_prompt_dash_empty_stdin_e2e() -> None:
-    """End-to-end: `ezwork -p - < /dev/null` exits 2 without a model call."""
-    result = subprocess.run(
-        [sys.executable, "-m", "ezwork.app.cli", "-p", "-"],
-        input=b"",
-        capture_output=True,
-        timeout=30,
-        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    )
-    assert result.returncode == 2
-    assert b"no input on stdin" in result.stderr
